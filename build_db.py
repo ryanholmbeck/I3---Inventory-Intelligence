@@ -246,6 +246,7 @@ def build_schema(conn):
         days_since_last_movement INTEGER, aging_flag INTEGER DEFAULT 0,
         overstock_flag INTEGER DEFAULT 0, overstock_ratio REAL DEFAULT 0,
         date_last_movement TEXT, calculated_at TEXT,
+        vendor_no TEXT,
         PRIMARY KEY(item_no, location_code));
 
     CREATE TABLE IF NOT EXISTS item_master_supplement (

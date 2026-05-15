@@ -294,10 +294,10 @@ select option{background:var(--bg3)}
   <button class="btn btn-ghost btn-sm" onclick="exportCalcCSV()">Export CSV</button>
 </div>
 <div class="table-wrap"><table id="tbl-calculator"><thead><tr>
-  <th>Item No.</th><th>Description</th><th>ABC</th><th>ADU (Total)</th><th>ADU (Sales)</th><th>ADU (Mfg)</th><th>LT</th><th>SS</th>
+  <th>Item No.</th><th>Description</th><th title="Last vendor purchased from at this location (falls back to BC item card)">Vendor</th><th>ABC</th><th>ADU (Total)</th><th>ADU (Sales)</th><th>ADU (Mfg)</th><th title="Average observed lead time (days) for this item at this location, falling back to all locations, then BC item card">LT</th><th>SS</th>
   <th>Bin 1 ROP</th><th>Bin 2 Qty</th><th>ROP</th><th>Min</th><th>Max</th>
   <th>System</th><th>Ann. Spend</th><th title="Stocking Recommendation: STOCK / NO-STOCK / REVIEW">Rec.</th><th>Flags</th><th>Excl.</th>
-</tr></thead><tbody id="calcBody"><tr><td colspan="16" class="empty-state">Import data then click ⚡ Recalculate</td></tr></tbody></table></div>
+</tr></thead><tbody id="calcBody"><tr><td colspan="19" class="empty-state">Import data then click ⚡ Recalculate</td></tr></tbody></table></div>
 
 </div><!-- /calcTab-active -->
 
@@ -1484,6 +1484,7 @@ function buildSchema() {
     days_since_last_movement INTEGER, aging_flag INTEGER DEFAULT 0,
     overstock_flag INTEGER DEFAULT 0, overstock_ratio REAL DEFAULT 0,
     date_last_movement TEXT, calculated_at TEXT,
+    vendor_no TEXT,
     PRIMARY KEY(item_no, location_code))`);
   DB.run(`CREATE TABLE IF NOT EXISTS exclusions (item_no TEXT, location_code TEXT, excluded INTEGER DEFAULT 1, reason TEXT, PRIMARY KEY(item_no, location_code))`);
   DB.run(`CREATE TABLE IF NOT EXISTS item_master_supplement (
@@ -4809,6 +4810,7 @@ function computeCalculator() {
   // Ensure columns exist for older databases
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_sales REAL DEFAULT 0`); } catch(e) {}
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_mfg REAL DEFAULT 0`); } catch(e) {}
+  try { DB.run(`ALTER TABLE item_calculator ADD COLUMN vendor_no TEXT`); } catch(e) {}
   try { DB.run(`ALTER TABLE exclusion_rules ADD COLUMN is_active INTEGER DEFAULT 1`); } catch(e) {}
 
   // Column positions:
@@ -4816,6 +4818,7 @@ function computeCalculator() {
   // 6:adu_sales 7:adu_mfg 8:unit_cost 9:lead_time_calc 10:ipg
   // 11:qty_on_hand 12:drop_flag 13:box 14:excluded 15:reason
   // 16:nncr 17:cc 18:dsOnly 19:space 20:custCnt 21:stockOv
+  // 22:last_po_vendor 23:item_vendor
   const rows = DB.exec(
     `SELECT c.item_no, c.abc_class, c.annualized_spend,
             COALESCE(s.adu,0), COALESCE(s.std_dev,0), s.date_last,
@@ -4827,7 +4830,12 @@ function computeCalculator() {
             COALESCE(e.excluded,0), COALESCE(e.reason,''),
             COALESCE(sup.nncr_flag,0), COALESCE(sup.customer_contract_flag,0),
             COALESCE(sup.drop_ship_only,0), COALESCE(sup.physical_space_available,1),
-            COALESCE(sup.customer_count,0), COALESCE(sup.stocking_override,'')
+            COALESCE(sup.customer_count,0), COALESCE(sup.stocking_override,''),
+            (SELECT po.vendor_no FROM purchase_orders po
+              WHERE po.item_no=c.item_no AND po.location_code=c.location_code
+                AND po.vendor_no IS NOT NULL AND po.vendor_no<>''
+              ORDER BY po.order_date DESC LIMIT 1) AS last_po_vendor,
+            COALESCE(i.vendor_no,'') AS item_vendor
      FROM item_calculator c
      LEFT JOIN ile_summary s
        ON c.item_no=s.item_no AND s.location_code=c.location_code
@@ -4865,8 +4873,10 @@ function computeCalculator() {
     const stockOv  = row[21]||'';
     const date_last= row[5]||null;
     const std_dev  = row[4]||0;
+    // Vendor: prefer last vendor purchased from at this location, fall back to BC item card
+    const vendorNo = (row[22] || row[23] || '') || null;
 
-    // Lead time — priority: 1) Observed LT from receipts, 2) BC Item Card, 3) 10D default
+    // Lead time — priority: 1) Observed LT from receipts (this location), 2) Observed LT any location, 3) BC Item Card, 4) 10D default
     let lt = 10; // standard default
     if (lt_raw) {
       const n = parseInt(lt_raw.replace(/\D/g,''));
@@ -4876,15 +4886,32 @@ function computeCalculator() {
     const useObservedLT = getParam('use_observed_lead_time','yes');
     if (useObservedLT !== 'no') {
       try {
-        const oltR = DB.exec(
-          `SELECT ROUND(AVG(actual_lt_days),0) AS avg_lt
-           FROM observed_lead_times
-           WHERE item_no=? AND actual_lt_days > 0 AND actual_lt_days <= 365`,
-          [item_no]
+        // observed_lead_times has no location_code — scope by joining to purchase_orders.po_no
+        const oltLoc = DB.exec(
+          `SELECT ROUND(AVG(o.actual_lt_days),0) AS avg_lt
+           FROM observed_lead_times o
+           WHERE o.item_no=? AND o.actual_lt_days > 0 AND o.actual_lt_days <= 365
+             AND EXISTS (
+               SELECT 1 FROM purchase_orders po
+               WHERE po.po_no=o.po_no AND po.item_no=o.item_no
+                 AND po.location_code=?
+             )`,
+          [item_no, currentLocation]
         );
-        if (oltR.length && oltR[0].values.length && oltR[0].values[0][0] !== null) {
-          const obsLT = Math.round(oltR[0].values[0][0]);
-          if (obsLT > 0) lt = obsLT;
+        let obsLT = (oltLoc.length && oltLoc[0].values.length) ? oltLoc[0].values[0][0] : null;
+        if (obsLT === null || obsLT === 0) {
+          // Fall back to item-level average when no location-scoped receipts exist
+          const oltAny = DB.exec(
+            `SELECT ROUND(AVG(actual_lt_days),0) AS avg_lt
+             FROM observed_lead_times
+             WHERE item_no=? AND actual_lt_days > 0 AND actual_lt_days <= 365`,
+            [item_no]
+          );
+          obsLT = (oltAny.length && oltAny[0].values.length) ? oltAny[0].values[0][0] : null;
+        }
+        if (obsLT !== null) {
+          const obs = Math.round(obsLT);
+          if (obs > 0) lt = obs;
         }
       } catch(e) {} // table may not exist yet
     }
@@ -4906,10 +4933,13 @@ function computeCalculator() {
     } else {
       ss = Math.ceil(ADU * SS_d);
     }
-    const bin1 = Math.ceil(ADU * (lt + OF) + ss);
-    const bin2 = Math.max(Math.ceil((ADU * OF) / BOX) * BOX, P.minFloor);
+    // Round all stocking quantities up to the pack size (std_box_qty)
+    const roundPack = v => Math.ceil((v||0) / BOX) * BOX;
+    ss = roundPack(ss);
+    const bin1 = roundPack(ADU * (lt + OF) + ss);
+    const bin2 = Math.max(roundPack(ADU * OF), P.minFloor);
     const rop  = bin1;
-    const minQ = Math.max(bin2, P.minFloor);
+    const minQ = Math.max(roundPack(bin2), roundPack(P.minFloor));
     const maxQ = bin1 + bin2;
     const sysType = ADU > P.oneBin ? '2-BIN' : '1-BIN';
 
@@ -4962,7 +4992,7 @@ function computeCalculator() {
          excluded=?, exclude_reason=?,
          days_since_last_movement=?, aging_flag=?,
          overstock_flag=?, overstock_ratio=?,
-         date_last_movement=?, calculated_at=datetime('now')
+         date_last_movement=?, vendor_no=?, calculated_at=datetime('now')
        WHERE item_no=? AND location_code=?
          AND (excluded=0 OR excluded IS NULL)`,
       [lt, BOX, OF,
@@ -4974,7 +5004,7 @@ function computeCalculator() {
        excl ? 1 : 0, excReason,
        daysSince, agingFlag,
        ovFlag, ovRatio,
-       date_last, item_no, currentLocation]
+       date_last, vendorNo, item_no, currentLocation]
     );
   }
   DB.run('COMMIT');
@@ -5045,7 +5075,8 @@ function renderCalcTable() {
   const rec = document.getElementById('calcRec')?.value||'';
   const replenish = document.getElementById('calcReplenish')?.value||'';
 
-  let sql = `SELECT c.item_no,i.description,c.abc_class,c.adu,c.adu_sales,c.adu_mfg,c.lead_time_days,c.safety_stock,
+  let sql = `SELECT c.item_no,i.description,COALESCE(c.vendor_no,i.vendor_no,'') AS vendor_no,
+    c.abc_class,c.adu,c.adu_sales,c.adu_mfg,c.lead_time_days,c.safety_stock,
     c.bin1_trigger,c.bin2_replenish,c.reorder_point,c.min_order_qty,c.max_order_qty,
     c.system_type,c.annualized_spend,c.stocking_recommendation,c.stocking_flags,
     c.excluded,c.aging_flag,c.overstock_flag
@@ -5066,11 +5097,12 @@ function renderCalcTable() {
 
   const tbody = document.getElementById('calcBody');
   if (!tbody) return;
-  tbody.innerHTML = data.length ? data.map(([no,desc,abc,adu,aduS,aduM,lt,ss,b1,b2,rop,mn,mx,sys,spend,rec,flags,excl,aging,over])=>{
+  tbody.innerHTML = data.length ? data.map(([no,desc,vno,abc,adu,aduS,aduM,lt,ss,b1,b2,rop,mn,mx,sys,spend,rec,flags,excl,aging,over])=>{
     const fa = (() => { try{return JSON.parse(flags||'[]');}catch{return [];} })();
     return `<tr>
       <td class="mono" style="color:var(--text);font-weight:500">${no}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${(desc||'').slice(0,32)}</td>
+      <td class="mono">${vno||'—'}</td>
       <td>${abcBadge(abc)}</td>
       <td class="mono" style="color:var(--text);font-weight:500">${(adu||0).toFixed(3)}</td>
       <td class="mono" style="color:var(--teal)">${(aduS||0).toFixed(3)}</td>
@@ -5088,7 +5120,7 @@ function renderCalcTable() {
       <td>${fa.slice(0,3).map(f=>`<span class="flag-chip">${f}</span>`).join('')}${aging?'<span class="badge" style="background:rgba(224,82,82,.12);color:var(--red)">AGING</span>':''}${over?'<span class="badge" style="background:rgba(245,166,35,.12);color:var(--amber)">OVER</span>':''}</td>
       <td><label style="cursor:pointer;font-size:11px;color:var(--text3)"><input type="checkbox" ${excl?'checked':''} onchange="toggleExclude('${no}',this.checked)"> Excl</label></td>
     </tr>`;
-  }).join('') : '<tr><td colspan="18" class="empty-state">Import data then click ⚡ Recalculate</td></tr>';
+  }).join('') : '<tr><td colspan="19" class="empty-state">Import data then click ⚡ Recalculate</td></tr>';
 }
 
 function toggleExclude(itemNo, excl) {
@@ -5855,13 +5887,14 @@ function exportBCUpload() {
 
 function exportCalcCSV() {
   if (!currentLocation) return;
-  const rows=DB.exec(`SELECT c.item_no,i.description,c.abc_class,c.adu,c.lead_time_days,c.safety_stock,
+  const rows=DB.exec(`SELECT c.item_no,i.description,COALESCE(c.vendor_no,i.vendor_no,'') AS vendor_no,
+    c.abc_class,c.adu,c.lead_time_days,c.std_box_qty,c.safety_stock,
     c.bin1_trigger,c.bin2_replenish,c.reorder_point,c.min_order_qty,c.max_order_qty,
     c.system_type,c.annualized_spend,c.stocking_recommendation
     FROM item_calculator c LEFT JOIN items i ON c.item_no=i.item_no
     WHERE c.location_code=? ORDER BY c.abc_rank`,[currentLocation]);
   if (!rows.length) return;
-  const hdr='Item No.,Description,ABC,ADU,Lead Time,Safety Stock,Bin 1,Bin 2,ROP,Min,Max,System,Ann. Spend,Recommendation';
+  const hdr='Item No.,Description,Vendor No.,ABC,ADU,Lead Time,Pack Size,Safety Stock,Bin 1,Bin 2,ROP,Min,Max,System,Ann. Spend,Recommendation';
   const csv=[hdr,...rows[0].values.map(r=>r.map(v=>v===null?'':String(v).includes(',')?`"${v}"`:v).join(','))].join('\n');
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
