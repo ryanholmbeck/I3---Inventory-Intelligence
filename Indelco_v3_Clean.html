@@ -1342,46 +1342,106 @@ function dropFile(e, type) {
   });
 }
 
+// ── Data sources ─────────────────────────────────────
+// Three ways the app can hydrate its in-browser SQLite database. Default
+// is local-db (server.py serves indelco.db). bc-api is a stub until the
+// Business Central web service is exposed.
+//
+// To switch source: append ?source=bc-api to the URL, or set
+// localStorage.data_source = 'bc-api' from devtools. Falls back to
+// local-db if the requested source fails.
+const DATA_SOURCES = {
+  'local-db':    { label: 'Local indelco.db',         load: loadFromLocalServer },
+  'file-picker': { label: 'Manual file upload',       load: loadFromFilePicker  },
+  'bc-api':      { label: 'Business Central live API', load: loadFromBCAPI      },
+};
+
+function getDataSource() {
+  const params = new URLSearchParams(location.search);
+  return params.get('source') || localStorage.getItem('data_source') || 'local-db';
+}
+
+function setDataSource(key) {
+  if (!DATA_SOURCES[key]) return false;
+  localStorage.setItem('data_source', key);
+  return true;
+}
+
+async function loadFromLocalServer() {
+  const res = await fetch('/indelco.db', {cache: 'no-cache'});
+  if (!res.ok) throw new Error(`server.py returned ${res.status}`);
+  const buf = await res.arrayBuffer();
+  DB = new SQL.Database(new Uint8Array(buf));
+  const meta = DB.exec(`SELECT value FROM db_meta WHERE key='merged_at'`);
+  const ts = meta.length && meta[0].values.length ? meta[0].values[0][0] : 'unknown';
+  updateDBStatus(`Live · refreshed ${ts.slice(0,16)}`, true);
+  toast('Database loaded from server ✓', 'success');
+}
+
+async function loadFromFilePicker() {
+  // No auto-load — the user uses the 📂 Load button in the sidebar.
+  // We just stand up an empty DB and wait.
+  throw new Error('Use the Load button to pick a .db file');
+}
+
+async function loadFromBCAPI() {
+  // ── BC API stub ──────────────────────────────────────────────────
+  // When BC OData/web services are exposed, implement here:
+  //   1. const base = '<BC OData root, e.g. https://bc.indelco.com/.../ODataV4>'
+  //   2. Auth header: web service access key (Basic) or OAuth bearer token
+  //   3. For each table the schema needs (items, ile_transactions, ...),
+  //      page through `?$top=N&$skip=K&$select=...` and bulk-insert into
+  //      the in-memory sql.js DB using prepared statements (same pattern
+  //      as the import functions further down in this file).
+  //   4. Honor an ile_lookback_days cutoff so the initial sync doesn't
+  //      pull 4 years of history every time.
+  // Until then, this source is intentionally a no-op that hands control
+  // back to the user via the existing showLoadDBPrompt UI.
+  throw new Error('BC API not configured yet — falling back to local-db');
+}
+
 // ── Boot ─────────────────────────────────────────────
 async function initSQL() {
   SQL = await initSqlJs({ locateFile: f => `vendor/${f}` });
 
-  // Try to auto-load indelco.db from local server
-  updateDBStatus('Connecting to server...', false);
-  let serverLoaded = false;
-  try {
-    const res = await fetch('/indelco.db', {cache: 'no-cache'});
-    if (res.ok) {
-      const buf = await res.arrayBuffer();
-      DB = new SQL.Database(new Uint8Array(buf));
-      serverLoaded = true;
-      const meta = DB.exec(`SELECT value FROM db_meta WHERE key='merged_at'`);
-      const ts = meta.length && meta[0].values.length ? meta[0].values[0][0] : 'unknown';
-      updateDBStatus(`Live · refreshed ${ts.slice(0,16)}`, true);
-      toast('Database loaded from server ✓', 'success');
-    }
-  } catch(e) { /* server not running */ }
+  const sourceKey = getDataSource();
+  const source = DATA_SOURCES[sourceKey] || DATA_SOURCES['local-db'];
+  updateDBStatus(`Connecting · ${source.label}...`, false);
 
-  if (!serverLoaded) {
-    // No server — start with empty DB
+  let loaded = false;
+  try {
+    await source.load();
+    loaded = true;
+  } catch (e) {
+    console.warn(`Data source "${sourceKey}" failed:`, e);
+    // If a non-default source fails, fall back to local-db so the user
+    // isn't stranded.
+    if (sourceKey !== 'local-db') {
+      try {
+        toast(`${source.label} unavailable — trying local-db`, 'info');
+        await loadFromLocalServer();
+        loaded = true;
+      } catch (e2) { console.warn('local-db fallback also failed:', e2); }
+    }
+  }
+
+  if (!loaded) {
     DB = new SQL.Database();
     buildSchema();
     seedBuyerXref();
     seedParams();
-    updateDBStatus('No server — load indelco.db manually', false);
+    updateDBStatus('No data loaded — see Dashboard prompt', false);
   }
 
-  // Always run these regardless of how DB was loaded
   loadRulesFromStorage();
   loadLocationDropdown();
   renderParams();
   populateBuyerDropdown();
 
-  if (serverLoaded) {
+  if (loaded) {
     refreshDashboard();
     showDBStatus();
   } else {
-    // Show load DB prompt prominently
     showLoadDBPrompt();
   }
 }
