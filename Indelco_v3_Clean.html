@@ -1497,23 +1497,69 @@ function showDBStatus() {
 function showLoadDBPrompt() {
   // Show a clear call-to-action if no data is loaded
   const dashSub = document.getElementById('dashSub');
-  if (dashSub) {
-    dashSub.innerHTML = `
-      <div style="background:rgba(77,124,254,.1);border:1px solid rgba(77,124,254,.3);border-radius:8px;padding:16px;margin-bottom:12px">
-        <div style="font-size:14px;font-weight:500;color:var(--accent2);margin-bottom:8px">📂 No database loaded</div>
-        <div style="font-size:12px;color:var(--text2);margin-bottom:12px">Load <span class="mono">indelco.db</span> to get started, or start the server.</div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <label class="btn btn-primary btn-sm" style="cursor:pointer">
-            📂 Load indelco.db
-            <input type="file" accept=".db,.sqlite" style="display:none" onchange="loadDB(this);showPage('dashboard')">
-          </label>
-          <button class="btn btn-ghost btn-sm" onclick="showPage('import')">📋 Import CSVs manually</button>
-        </div>
-        <div style="margin-top:10px;font-size:11px;color:var(--text3)">
-          Or start the server: double-click <span class="mono">Open_App.bat</span> in your 3I folder
-        </div>
-      </div>`;
-  }
+  if (!dashSub) return;
+  // Initial paint with a placeholder; we'll fill in /status diagnostics async.
+  dashSub.innerHTML = `
+    <div style="background:rgba(77,124,254,.1);border:1px solid rgba(77,124,254,.3);border-radius:8px;padding:16px;margin-bottom:12px">
+      <div style="font-size:14px;font-weight:500;color:var(--accent2);margin-bottom:8px">📂 No database loaded</div>
+      <div id="loadDiag" style="font-size:12px;color:var(--text2);margin-bottom:12px">Checking server…</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <label class="btn btn-primary btn-sm" style="cursor:pointer">
+          📂 Load indelco.db manually
+          <input type="file" accept=".db,.sqlite" style="display:none" onchange="loadDB(this);showPage('dashboard')">
+        </label>
+        <button class="btn btn-ghost btn-sm" onclick="initSQL()">🔄 Retry server</button>
+        <button class="btn btn-ghost btn-sm" onclick="showPage('import')">📋 Import CSVs manually</button>
+      </div>
+    </div>`;
+
+  // Live diagnostic — tells the user the exact state of server.py + indelco.db
+  // so they don't have to open devtools to find the problem.
+  (async () => {
+    const diag = document.getElementById('loadDiag');
+    if (!diag) return;
+    const line = (label, ok, detail) =>
+      `<div style="margin:2px 0"><span style="color:${ok?'var(--green)':'var(--red)'}">${ok?'✓':'✗'}</span> ${label}${detail?` — <span class="mono" style="color:var(--text3)">${detail}</span>`:''}</div>`;
+    const lines = [];
+    let serverUp = false, dbReachable = false, statusJson = null;
+    try {
+      const r = await fetch('/status', {cache:'no-cache'});
+      if (r.ok) { serverUp = true; statusJson = await r.json(); }
+      else lines.push(line('server.py /status', false, `HTTP ${r.status}`));
+    } catch(e) {
+      lines.push(line('server.py reachable', false, e.message));
+    }
+    if (serverUp) {
+      lines.push(line('server.py reachable on :8765', true));
+      if (statusJson) {
+        if (statusJson.db_exists) {
+          lines.push(line('indelco.db found on server', true, `${statusJson.db_size_mb} MB`));
+        } else {
+          lines.push(line('indelco.db NOT found next to server.py', false,
+            'expected at the path printed in server.py console'));
+        }
+      }
+      try {
+        const r2 = await fetch('/indelco.db', {method:'HEAD', cache:'no-cache'});
+        dbReachable = r2.ok;
+        lines.push(line('/indelco.db endpoint', r2.ok, `HTTP ${r2.status}`));
+      } catch(e) {
+        lines.push(line('/indelco.db endpoint', false, e.message));
+      }
+    }
+    let hint = '';
+    if (!serverUp) {
+      hint = 'Double-click <span class="mono">Open_App.bat</span> in your 3I folder, or run <span class="mono">python server.py</span> from a command prompt in that folder.';
+    } else if (statusJson && !statusJson.db_exists) {
+      hint = 'server.py is running but cannot find <span class="mono">indelco.db</span>. It must be in the same folder as <span class="mono">server.py</span>. Run <span class="mono">build_db.py</span> from there, or copy indelco.db into that folder.';
+    } else if (!dbReachable) {
+      hint = 'server.py is running and indelco.db exists, but the fetch failed. Try the 🔄 Retry button, or check the server.py console for errors.';
+    } else {
+      hint = 'Everything looks reachable — try the 🔄 Retry button.';
+    }
+    diag.innerHTML = lines.join('') +
+      `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);color:var(--text2)">${hint}</div>`;
+  })();
 }
 
 function buildSchema() {
