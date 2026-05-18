@@ -1410,7 +1410,8 @@ async function initSQL() {
   // Catastrophic case: vendor/sql-wasm.js didn't load → initSqlJs undefined.
   if (typeof initSqlJs !== 'function') {
     updateDBStatus('sql.js failed to load (check vendor/ folder)', false);
-    toast('Could not load vendor/sql-wasm.js — is the vendor/ folder present next to the HTML?', 'error');
+    toast('Could not load vendor/sql-wasm.js — see the panel on the dashboard for details', 'error');
+    showVendorMissingPanel();
     return;
   }
 
@@ -1492,6 +1493,77 @@ function showDBStatus() {
       `${(ileCount/1000).toFixed(0)}K ILE · ${itemCount.toLocaleString()} items · ${locCount} locs`;
     if (ileCount === 0) showLoadDBPrompt();
   } catch(e) {}
+}
+
+function showVendorMissingPanel() {
+  // Renders an in-page diagnostic when vendor/sql-wasm.js failed to load,
+  // so the user doesn't have to open devtools to see what happened.
+  const dashSub = document.getElementById('dashSub');
+  if (!dashSub) return;
+  dashSub.innerHTML = `
+    <div style="background:rgba(255,80,80,.08);border:1px solid rgba(255,80,80,.35);border-radius:8px;padding:16px;margin-bottom:12px">
+      <div style="font-size:14px;font-weight:500;color:var(--red);margin-bottom:8px">⚠ sql.js (vendor/sql-wasm.js) did not load</div>
+      <div id="vendorDiag" style="font-size:12px;color:var(--text2);margin-bottom:12px">Checking vendor files…</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="location.reload()">🔄 Reload page</button>
+        <button class="btn btn-ghost btn-sm" onclick="initSQL()">↻ Retry init</button>
+      </div>
+    </div>`;
+
+  (async () => {
+    const diag = document.getElementById('vendorDiag');
+    if (!diag) return;
+    const line = (label, ok, detail) =>
+      `<div style="margin:2px 0"><span style="color:${ok?'var(--green)':'var(--red)'}">${ok?'✓':'✗'}</span> ${label}${detail?` — <span class="mono" style="color:var(--text3)">${detail}</span>`:''}</div>`;
+
+    const pageUrl   = location.href;
+    const protocol  = location.protocol;
+    const jsUrl     = new URL('vendor/sql-wasm.js',   location.href).href;
+    const wasmUrl   = new URL('vendor/sql-wasm.wasm', location.href).href;
+
+    const lines = [
+      `<div style="margin:0 0 6px 0;color:var(--text3)">Page URL: <span class="mono">${pageUrl}</span></div>`,
+      `<div style="margin:0 0 6px 0;color:var(--text3)">Tried to load: <span class="mono">${jsUrl}</span></div>`,
+    ];
+
+    let jsStatus = null, wasmStatus = null;
+    const head = async (url) => {
+      try {
+        const r = await fetch(url, {method:'HEAD', cache:'no-cache'});
+        return {ok: r.ok, status: r.status, ct: r.headers.get('content-type') || ''};
+      } catch(e) {
+        return {ok: false, status: 0, err: e.message};
+      }
+    };
+
+    if (protocol === 'file:') {
+      lines.push(line('Served via http://', false, `protocol is ${protocol}`));
+    } else {
+      [jsStatus, wasmStatus] = await Promise.all([head(jsUrl), head(wasmUrl)]);
+      lines.push(line('vendor/sql-wasm.js fetch',
+        jsStatus.ok,
+        jsStatus.err ? jsStatus.err : `HTTP ${jsStatus.status}${jsStatus.ct?` · ${jsStatus.ct}`:''}`));
+      lines.push(line('vendor/sql-wasm.wasm fetch',
+        wasmStatus.ok,
+        wasmStatus.err ? wasmStatus.err : `HTTP ${wasmStatus.status}${wasmStatus.ct?` · ${wasmStatus.ct}`:''}`));
+    }
+
+    let hint;
+    if (protocol === 'file:') {
+      hint = `You opened the HTML directly (<span class="mono">file://</span>). sql.js needs an http server. Double-click <span class="mono">Open_App.bat</span> in the 3I folder, or run <span class="mono">python server.py</span> there and visit <span class="mono">http://localhost:8765/Indelco_v3_Clean.html</span>.`;
+    } else if (jsStatus && !jsStatus.ok) {
+      hint = `The browser could not fetch <span class="mono">vendor/sql-wasm.js</span> (HTTP ${jsStatus.status}). The <span class="mono">vendor/</span> folder must sit next to <span class="mono">Indelco_v3_Clean.html</span> and <span class="mono">server.py</span>. Check that <span class="mono">vendor/sql-wasm.js</span> and <span class="mono">vendor/sql-wasm.wasm</span> both exist in that folder.`;
+    } else if (wasmStatus && !wasmStatus.ok) {
+      hint = `<span class="mono">sql-wasm.js</span> loaded but <span class="mono">sql-wasm.wasm</span> is missing (HTTP ${wasmStatus.status}). Copy the full <span class="mono">vendor/</span> folder, not just the .js file.`;
+    } else if (jsStatus && jsStatus.ok) {
+      hint = `<span class="mono">sql-wasm.js</span> was reachable on retry, but <span class="mono">initSqlJs</span> was undefined when the page first ran. This usually means the script returned the wrong content (e.g. an HTML error page instead of JS — check Content-Type above). Try Reload page.`;
+    } else {
+      hint = `Unable to determine cause. Open devtools (F12) → Network and look for <span class="mono">vendor/sql-wasm.js</span>.`;
+    }
+
+    diag.innerHTML = lines.join('') +
+      `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);color:var(--text2)">${hint}</div>`;
+  })();
 }
 
 function showLoadDBPrompt() {
