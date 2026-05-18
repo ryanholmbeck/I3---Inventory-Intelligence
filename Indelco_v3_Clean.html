@@ -2240,8 +2240,7 @@ function evaluateExclusionRules() {
 }
 
 // ── Apply exclusions to item_calculator before calc runs ──────────────
-function applyExclusionRules() {
-  // Ensure table exists for DBs built before this feature
+async function applyExclusionRules() {
   try { DB.run(`CREATE TABLE IF NOT EXISTS exclusion_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     field_name TEXT NOT NULL, operator TEXT NOT NULL,
@@ -2252,30 +2251,40 @@ function applyExclusionRules() {
   const excluded = evaluateExclusionRules();
   if (!excluded.size) return 0;
 
-  // Clear previous auto-exclusions (keep manual ones)
   DB.run(`UPDATE item_calculator SET excluded=0, exclude_reason=NULL
           WHERE location_code=? AND exclude_reason NOT LIKE 'Manual:%'`,
          [currentLocation]);
 
+  const insertCalc = DB.prepare(
+    `INSERT INTO item_calculator(
+       item_no, location_code, excluded, exclude_reason,
+       stocking_recommendation, stocking_flags, calculated_at)
+     VALUES(?,?,1,?,'NO-STOCK','["EXCLUDED"]',datetime('now'))
+     ON CONFLICT(item_no,location_code) DO UPDATE SET
+       excluded=1,
+       exclude_reason=excluded.exclude_reason,
+       stocking_recommendation='NO-STOCK'`);
+  const insertExcl = DB.prepare(
+    `INSERT OR REPLACE INTO exclusions(item_no,location_code,excluded,reason)
+     VALUES(?,?,1,?)`);
+
+  try { DB.run('ROLLBACK'); } catch(e) {}
   DB.run('BEGIN');
-  for (const [item_no, {reason}] of excluded) {
-    // Insert into item_calculator regardless of ILE history — ensures all excluded
-    // items appear in the Excluded tab even if they have no movement data
-    DB.run(`INSERT OR IGNORE INTO item_calculator(
-              item_no, location_code, excluded, exclude_reason,
-              stocking_recommendation, stocking_flags, calculated_at)
-            VALUES(?,?,1,?,'NO-STOCK','["EXCLUDED"]',datetime('now'))`,
-           [item_no, currentLocation, reason]);
-    DB.run(`UPDATE item_calculator
-            SET excluded=1, exclude_reason=?,
-                stocking_recommendation='NO-STOCK'
-            WHERE item_no=? AND location_code=?`,
-           [reason, item_no, currentLocation]);
-    // Exclusions table
-    DB.run(`INSERT OR REPLACE INTO exclusions(item_no,location_code,excluded,reason)
-            VALUES(?,?,1,?)`, [item_no, currentLocation, reason]);
+  try {
+    let i = 0;
+    for (const [item_no, {reason}] of excluded) {
+      insertCalc.run([item_no, currentLocation, reason]);
+      insertExcl.run([item_no, currentLocation, reason]);
+      if ((++i % 2000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+    }
+    DB.run('COMMIT');
+  } catch(e) {
+    try { DB.run('ROLLBACK'); } catch(_) {}
+    throw e;
+  } finally {
+    insertCalc.free();
+    insertExcl.free();
   }
-  DB.run('COMMIT');
   return excluded.size;
 }
 
@@ -2663,13 +2672,11 @@ function calcServiceLevelSS(stdDev, leadTimeDays, serviceLevelPct) {
 }
 
 // ── XYZ Classification ────────────────────────────────────────────────
-function runXYZClassification() {
+async function runXYZClassification() {
   if (!currentLocation) return;
   const xT = getParam('xyz_x_threshold', 0.5);
   const yT = getParam('xyz_y_threshold', 1.0);
 
-  // Calculate CoV from ile_summary: std_dev / (adu * lookback / avg_tx) 
-  // Simpler: use std_dev / adu where both exist
   const rows = DB.exec(
     `SELECT item_no, adu, std_dev
      FROM ile_summary WHERE location_code=? AND adu > 0`,
@@ -2677,22 +2684,34 @@ function runXYZClassification() {
   );
   if (!rows.length || !rows[0].values.length) return;
 
-  // Ensure table exists
   try { DB.run(`CREATE TABLE IF NOT EXISTS xyz_classification (
     item_no TEXT, location_code TEXT, xyz_class TEXT, cov REAL,
     classified_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY(item_no, location_code))`); } catch(e) {}
 
   DB.run(`DELETE FROM xyz_classification WHERE location_code=?`, [currentLocation]);
+
+  const stmt = DB.prepare(
+    `INSERT OR REPLACE INTO xyz_classification(item_no,location_code,xyz_class,cov)
+     VALUES(?,?,?,?)`);
+  try { DB.run('ROLLBACK'); } catch(e) {}
   DB.run('BEGIN');
-  for (const [item, adu, std] of rows[0].values) {
-    const cov = std / adu;  // Coefficient of Variation
-    const xyz = cov <= xT ? 'X' : cov <= yT ? 'Y' : 'Z';
-    DB.run(`INSERT OR REPLACE INTO xyz_classification(item_no,location_code,xyz_class,cov)
-            VALUES(?,?,?,?)`, [item, currentLocation, xyz, cov]);
+  try {
+    const data = rows[0].values;
+    for (let i = 0; i < data.length; i++) {
+      const [item, adu, std] = data[i];
+      const cov = std / adu;
+      const xyz = cov <= xT ? 'X' : cov <= yT ? 'Y' : 'Z';
+      stmt.run([item, currentLocation, xyz, cov]);
+      if (((i+1) % 5000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+    }
+    DB.run('COMMIT');
+  } catch(e) {
+    try { DB.run('ROLLBACK'); } catch(_) {}
+    throw e;
+  } finally {
+    stmt.free();
   }
-  DB.run('COMMIT');
-  toast(`XYZ: classified ${rows[0].values.length} items`, 'info');
 }
 
 // ── Enhanced aggregateILE with spike logging ──────────────────────────
@@ -4514,25 +4533,31 @@ async function runCalculationsAllLocations() {
     const locList = locs[0].values.map(r=>r[0]).filter(Boolean);
     const origLoc = currentLocation;
     let total = 0;
+    const t0 = performance.now();
     for (let i = 0; i < locList.length; i++) {
       const loc = locList[i];
       currentLocation = loc;
+      if (btn) btn.textContent = `⏳ ${i+1}/${locList.length} · ${loc}`;
       toast(`Location ${i+1}/${locList.length}: ${loc}`, 'info');
-      await sleep(50);
+      await sleep(0);
       try {
-        aggregateILE();
-        calculateABC();
-        computeCalculator();
-        runXYZClassification();
-        applyExclusionRules();
+        await aggregateILE();
+        await calculateABC();
+        await computeCalculator();
+        await runXYZClassification();
+        await applyExclusionRules();
         total++;
-      } catch(e) { console.error(`Failed for ${loc}:`, e); }
+      } catch(e) {
+        console.error(`Failed for ${loc}:`, e);
+        toast(`⚠ ${loc} failed: ${e.message}`, 'error');
+      }
     }
     currentLocation = origLoc;
     refreshDashboard();
     populateBuyerDropdown();
     renderParams();
-    toast(`✓ Calculations complete for ${total} locations`,'success');
+    const secs = ((performance.now()-t0)/1000).toFixed(1);
+    toast(`✓ Calculations complete for ${total} locations in ${secs}s`,'success');
   } catch(e) {
     console.error(e);
     toast('Error: '+e.message,'error');
@@ -4547,22 +4572,21 @@ async function runCalculations() {
   btn.textContent='⏳ Running...'; btn.disabled=true;
   try {
     toast('Step 1/5: Aggregating ILE + detecting spikes...','info');
-    await sleep(20);
-    aggregateILE();
+    await sleep(0);
+    await aggregateILE();
     toast('Step 2/5: ABC classification...','info');
-    await sleep(20);
-    calculateABC();
+    await sleep(0);
+    await calculateABC();
     toast('Step 3/5: Computing ROP/Min/Max...','info');
-    await sleep(20);
-    computeCalculator();
+    await sleep(0);
+    await computeCalculator();
     toast('Step 4/5: XYZ classification...','info');
-    await sleep(10);
-    runXYZClassification();
+    await sleep(0);
+    await runXYZClassification();
     toast('Step 5/5: Applying exclusion rules...','info');
-    await sleep(10);
-    const exclCount = applyExclusionRules();
+    await sleep(0);
+    const exclCount = await applyExclusionRules();
     if (exclCount > 0) toast(`${exclCount.toLocaleString()} items excluded by rules`,'info');
-    // Report spikes
     try {
       const sc = DB.exec(`SELECT COUNT(*) FROM spike_log WHERE location_code=?`,[currentLocation]);
       const n = sc.length ? sc[0].values[0][0] : 0;
@@ -4581,7 +4605,7 @@ async function runCalculations() {
   btn.disabled=false;
 }
 
-function aggregateILE() {
+async function aggregateILE() {
   // Ensure all tables exist regardless of DB age
   const _tbls = [
     `CREATE TABLE IF NOT EXISTS customers (customer_no TEXT PRIMARY KEY, name TEXT, city TEXT, state TEXT, country TEXT, payment_terms TEXT, credit_limit REAL DEFAULT 0, blocked INTEGER DEFAULT 0)`,
@@ -4590,7 +4614,6 @@ function aggregateILE() {
     `CREATE TABLE IF NOT EXISTS xyz_classification (item_no TEXT, location_code TEXT, xyz_class TEXT, cov REAL, classified_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(item_no, location_code))`,
   ];
   for (const sql of _tbls) { try { DB.run(sql); } catch(e) {} }
-  // Migration: add columns that may be missing from older DBs
   const _alters = [
     `ALTER TABLE purchase_orders ADD COLUMN drop_shipment INTEGER DEFAULT 0`,
     `ALTER TABLE purchase_orders ADD COLUMN purchaser_code TEXT`,
@@ -4615,14 +4638,6 @@ function aggregateILE() {
   const MFG_TYPES   = ['Consumption','5','Assembly Consumption','7'];
   const ALL_QUOTED  = [...SALE_TYPES,...MFG_TYPES].map(t=>"'"+t+"'").join(',');
 
-  // Ensure customers table exists before JOIN
-  try { DB.run(`CREATE TABLE IF NOT EXISTS customers (
-    customer_no TEXT PRIMARY KEY, name TEXT, city TEXT,
-    state TEXT, country TEXT, payment_terms TEXT,
-    credit_limit REAL DEFAULT 0, blocked INTEGER DEFAULT 0)`);
-  } catch(e) {}
-
-  // Full transaction detail for spike logging
   const rows = DB.exec(
     `SELECT t.item_no, ABS(t.quantity) AS qty, t.posting_date, t.entry_type,
             t.document_no, t.order_no, t.source_no,
@@ -4640,7 +4655,6 @@ function aggregateILE() {
   }
 
   const salesGroups = {}, mfgGroups = {}, lastMove = {};
-  // txDetail stores full row for spike logging: {qty, date, entry_type, doc_no, order_no, source_no, customer}
   const txDetail = {};
   for (const [item, qty, pd, et, doc_no, order_no, source_no, customer_name] of rows[0].values) {
     const isMfg = MFG_TYPES.includes(et);
@@ -4652,7 +4666,7 @@ function aggregateILE() {
     if (!lastMove[item] || pd > lastMove[item]) lastMove[item] = pd;
   }
 
-  const allItems = new Set([...Object.keys(salesGroups),...Object.keys(mfgGroups)]);
+  const allItems = [...new Set([...Object.keys(salesGroups),...Object.keys(mfgGroups)])];
 
   function calcStats(qtys) {
     if (!qtys || !qtys.length) return {adu:0,std:0,outliers:0,total:0,count:0};
@@ -4671,87 +4685,70 @@ function aggregateILE() {
     return {adu, std:std2, outliers:qtys.length-clean.length, total, count:qtys.length};
   }
 
-  // Ensure table exists with new columns
-  DB.run(`CREATE TABLE IF NOT EXISTS ile_summary (
-    item_no TEXT, location_code TEXT,
-    adu REAL DEFAULT 0, std_dev REAL DEFAULT 0,
-    adu_sales REAL DEFAULT 0, adu_mfg REAL DEFAULT 0,
-    tx_count INTEGER DEFAULT 0, outliers_excluded INTEGER DEFAULT 0,
-    tx_count_sales INTEGER DEFAULT 0, tx_count_mfg INTEGER DEFAULT 0,
-    total_qty_used REAL DEFAULT 0, date_last TEXT, last_aggregated TEXT,
-    PRIMARY KEY(item_no, location_code))`);
-
-  // Add columns if DB was built before this version
-  try { DB.run(`ALTER TABLE ile_summary ADD COLUMN adu_sales REAL DEFAULT 0`); } catch(e) {}
-  try { DB.run(`ALTER TABLE ile_summary ADD COLUMN adu_mfg REAL DEFAULT 0`); } catch(e) {}
-  try { DB.run(`ALTER TABLE ile_summary ADD COLUMN tx_count_sales INTEGER DEFAULT 0`); } catch(e) {}
-  try { DB.run(`ALTER TABLE ile_summary ADD COLUMN tx_count_mfg INTEGER DEFAULT 0`); } catch(e) {}
-
-  // Clear previous spike log for this location
+  // Clear previous data for this location, then bulk-insert via prepared statements
+  try { DB.run('ROLLBACK'); } catch(e) {}
   try { DB.run(`DELETE FROM spike_log WHERE location_code=?`, [currentLocation]); } catch(e) {}
   DB.run(`DELETE FROM ile_summary WHERE location_code=?`, [currentLocation]);
 
-  try { DB.run('COMMIT'); } catch(e) {} // close any stray transaction
+  const insSummary = DB.prepare(
+    `INSERT OR REPLACE INTO ile_summary(
+       item_no, location_code, adu, std_dev, adu_sales, adu_mfg,
+       tx_count, outliers_excluded, tx_count_sales, tx_count_mfg,
+       total_qty_used, date_last, last_aggregated)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`);
+  const insSpike = DB.prepare(
+    `INSERT INTO spike_log(item_no,location_code,posting_date,entry_type,
+       document_no,order_no,source_no,customer_name,
+       quantity,item_mean,item_std_dev,z_score,lookback_window,logged_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`);
+
   DB.run('BEGIN');
-  for (const item of allItems) {
-    const s = calcStats(salesGroups[item]);
-    const m = calcStats(mfgGroups[item]);
-    const totalADU = s.adu + m.adu;
-    const combinedStd = totalADU > 0
-      ? (s.adu/totalADU)*s.std + (m.adu/totalADU)*m.std
-      : Math.max(s.std, m.std);
-    DB.run(
-      `INSERT OR REPLACE INTO ile_summary(
-         item_no, location_code, adu, std_dev, adu_sales, adu_mfg,
-         tx_count, outliers_excluded, tx_count_sales, tx_count_mfg,
-         total_qty_used, date_last, last_aggregated)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
-      [item, currentLocation,
-       totalADU, combinedStd, s.adu, m.adu,
-       s.count + m.count,
-       s.outliers + m.outliers,
-       s.count, m.count,
-       s.total + m.total,
-       lastMove[item] || null]
-    );
-  }
-  DB.run('COMMIT');
+  try {
+    let i = 0;
+    for (const item of allItems) {
+      const s = calcStats(salesGroups[item]);
+      const m = calcStats(mfgGroups[item]);
+      const totalADU = s.adu + m.adu;
+      const combinedStd = totalADU > 0
+        ? (s.adu/totalADU)*s.std + (m.adu/totalADU)*m.std
+        : Math.max(s.std, m.std);
+      insSummary.run([item, currentLocation,
+        totalADU, combinedStd, s.adu, m.adu,
+        s.count + m.count, s.outliers + m.outliers,
+        s.count, m.count, s.total + m.total, lastMove[item] || null]);
 
-  // ── Log spike transactions ────────────────────────────────────────
-  try { DB.run('COMMIT'); } catch(e) {} // close any stray transaction
-  DB.run('BEGIN');
-  for (const item of allItems) {
-    const allTxs = txDetail[item] || [];
-    if (!allTxs.length) continue;
+      const allTxs = txDetail[item] || [];
+      if (allTxs.length > 1) {
+        const allQtys = allTxs.map(t => t.qty);
+        const mean = allQtys.reduce((a,b)=>a+b,0) / allQtys.length;
+        const std = Math.sqrt(allQtys.reduce((a,b)=>a+(b-mean)**2,0) / (allQtys.length-1));
+        if (std > 0) {
+          for (const tx of allTxs) {
+            const z = (tx.qty - mean) / std;
+            if (Math.abs(z) > outlierN) {
+              insSpike.run([item, currentLocation, tx.pd, tx.et,
+                tx.doc_no||'', tx.order_no||'', tx.source_no||'', tx.customer_name||'',
+                tx.qty, mean, std, z, lookback]);
+            }
+          }
+        }
+      }
 
-    const allQtys = allTxs.map(t => t.qty);
-    const mean = allQtys.reduce((a,b)=>a+b,0) / allQtys.length;
-    let std = 0;
-    if (allQtys.length > 1)
-      std = Math.sqrt(allQtys.reduce((a,b)=>a+(b-mean)**2,0) / (allQtys.length-1));
-    if (std <= 0) continue;
-
-    for (const tx of allTxs) {
-      const z = Math.abs(tx.qty - mean) / std;
-      if (z > outlierN) {
-        DB.run(
-          `INSERT INTO spike_log(item_no,location_code,posting_date,entry_type,
-            document_no,order_no,source_no,customer_name,
-            quantity,item_mean,item_std_dev,z_score,lookback_window,logged_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
-          [item, currentLocation, tx.pd, tx.et,
-           tx.doc_no||'', tx.order_no||'', tx.source_no||'', tx.customer_name||'',
-           tx.qty, mean, std, z, lookback]
-        );
+      if ((++i % 1000) === 0) {
+        DB.run('COMMIT'); await sleep(0); DB.run('BEGIN');
       }
     }
+    DB.run('COMMIT');
+  } catch(e) {
+    try { DB.run('ROLLBACK'); } catch(_) {}
+    throw e;
+  } finally {
+    insSummary.free();
+    insSpike.free();
   }
-  DB.run('COMMIT');
-
-  toast(`ADU: ${Object.keys(salesGroups).length} sales items, ${Object.keys(mfgGroups).length} mfg items`,'info');
 }
 
-function calculateABC() {
+async function calculateABC() {
   const aT = getParam('abc_a_threshold', 0.80);
   const bT = getParam('abc_b_threshold', 0.95);
   const wd = getParam('working_days_year', 252);
@@ -4771,30 +4768,39 @@ function calculateABC() {
   const totalSpend = data.reduce((a,r) => a + (r[1]||0), 0);
   if (totalSpend === 0) return;
 
-  // Ensure adu_sales/adu_mfg columns exist in item_calculator
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_sales REAL DEFAULT 0`); } catch(e) {}
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_mfg REAL DEFAULT 0`); } catch(e) {}
 
+  const stmt = DB.prepare(
+    `INSERT INTO item_calculator(item_no,location_code,abc_class,abc_rank,annualized_spend,calculated_at)
+     VALUES(?,?,?,?,?,datetime('now'))
+     ON CONFLICT(item_no,location_code) DO UPDATE SET
+       abc_class=excluded.abc_class,
+       abc_rank=excluded.abc_rank,
+       annualized_spend=excluded.annualized_spend,
+       calculated_at=excluded.calculated_at`);
+
+  try { DB.run('ROLLBACK'); } catch(e) {}
   DB.run('BEGIN');
-  let cum = 0;
-  data.forEach(([item, spend], i) => {
-    cum += (spend || 0);
-    const abc = cum/totalSpend <= aT ? 'A' : cum/totalSpend <= bT ? 'B' : 'C';
-    DB.run(
-      `INSERT INTO item_calculator(item_no,location_code,abc_class,abc_rank,annualized_spend,calculated_at)
-       VALUES(?,?,?,?,?,datetime('now'))
-       ON CONFLICT(item_no,location_code) DO UPDATE SET
-         abc_class=excluded.abc_class,
-         abc_rank=excluded.abc_rank,
-         annualized_spend=excluded.annualized_spend,
-         calculated_at=excluded.calculated_at`,
-      [item, currentLocation, abc, i+1, spend||0]
-    );
-  });
-  DB.run('COMMIT');
+  try {
+    let cum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const [item, spend] = data[i];
+      cum += (spend || 0);
+      const abc = cum/totalSpend <= aT ? 'A' : cum/totalSpend <= bT ? 'B' : 'C';
+      stmt.run([item, currentLocation, abc, i+1, spend||0]);
+      if (((i+1) % 2000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+    }
+    DB.run('COMMIT');
+  } catch(e) {
+    try { DB.run('ROLLBACK'); } catch(_) {}
+    throw e;
+  } finally {
+    stmt.free();
+  }
 }
 
-function computeCalculator() {
+async function computeCalculator() {
   const P = {
     ofa:getParam('order_freq_a',10), ofb:getParam('order_freq_b',20), ofc:getParam('order_freq_c',30),
     ssa:getParam('ss_days_a',10),    ssb:getParam('ss_days_b',15),    ssc:getParam('ss_days_c',20),
@@ -4805,11 +4811,47 @@ function computeCalculator() {
     wd:getParam('working_days_year',252),
   };
   const today = new Date().toISOString().slice(0,10);
+  const ssMethod = getParam('ss_method','days');
+  const useObservedLT = getParam('use_observed_lead_time','yes') !== 'no';
+  const slA = getParam('sl_target_a', 0.99);
+  const slB = getParam('sl_target_b', 0.97);
+  const slC = getParam('sl_target_c', 0.95);
 
-  // Ensure columns exist for older databases
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_sales REAL DEFAULT 0`); } catch(e) {}
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_mfg REAL DEFAULT 0`); } catch(e) {}
   try { DB.run(`ALTER TABLE exclusion_rules ADD COLUMN is_active INTEGER DEFAULT 1`); } catch(e) {}
+
+  // ── Pre-fetch all per-item lookups in bulk (was 2 DB.exec calls PER item) ───
+  const obsLT = new Map();
+  if (useObservedLT) {
+    try {
+      const r = DB.exec(
+        `SELECT item_no, ROUND(AVG(actual_lt_days),0)
+         FROM observed_lead_times
+         WHERE actual_lt_days > 0 AND actual_lt_days <= 365
+         GROUP BY item_no`);
+      if (r.length) for (const [it, lt] of r[0].values) if (lt) obsLT.set(it, Math.round(lt));
+    } catch(e) {}
+  }
+
+  const xyzMap = new Map();
+  if (ssMethod === 'sl') {
+    try {
+      const r = DB.exec(
+        `SELECT item_no, xyz_class FROM xyz_classification WHERE location_code=?`,
+        [currentLocation]);
+      if (r.length) for (const [it, cls] of r[0].values) xyzMap.set(it, cls);
+    } catch(e) {}
+  }
+
+  const slOverride = new Map(); // key: abc|xyz
+  if (ssMethod === 'sl') {
+    try {
+      const r = DB.exec(
+        `SELECT abc_class, xyz_class, target_service_level FROM service_level_params`);
+      if (r.length) for (const [a, x, sl] of r[0].values) slOverride.set(a+'|'+x, sl);
+    } catch(e) {}
+  }
 
   // Column positions:
   // 0:item_no 1:abc 2:annSpend 3:adu 4:std_dev 5:date_last
@@ -4842,142 +4884,130 @@ function computeCalculator() {
 
   if (!rows.length || !rows[0].values.length) return;
 
+  const upd = DB.prepare(
+    `UPDATE item_calculator SET
+       lead_time_days=?, std_box_qty=?, order_freq_days=?,
+       adu=?, std_dev=?, adu_sales=?, adu_mfg=?,
+       ss_days=?, safety_stock=?,
+       bin1_trigger=?, bin2_replenish=?, system_type=?,
+       reorder_point=?, min_order_qty=?, max_order_qty=?,
+       stocking_recommendation=?, stocking_flags=?,
+       excluded=?, exclude_reason=?,
+       days_since_last_movement=?, aging_flag=?,
+       overstock_flag=?, overstock_ratio=?,
+       date_last_movement=?, calculated_at=datetime('now')
+     WHERE item_no=? AND location_code=?
+       AND (excluded=0 OR excluded IS NULL)`);
+
+  try { DB.run('ROLLBACK'); } catch(e) {}
   DB.run('BEGIN');
-  for (const row of rows[0].values) {
-    const item_no  = row[0];
-    const abc      = (row[1]||'C').toUpperCase();
-    const ADU      = row[3]||0;
-    const aduS     = row[6]||0;
-    const aduM     = row[7]||0;
-    const UC       = row[8]||0;
-    const lt_raw   = row[9]||'';
-    const ipg      = (row[10]||'').toUpperCase();
-    const OH       = row[11]||0;
-    const dropFlag = row[12]||0;
-    const BOX      = Math.max(row[13]||1, 1);
-    const excl     = row[14]||0;
-    const excReason= row[15]||null;
-    const nncr     = row[16]||0;
-    const cc       = row[17]||0;
-    const dsOnly   = row[18]||0;
-    const space    = row[19];
-    const custCnt  = row[20]||0;
-    const stockOv  = row[21]||'';
-    const date_last= row[5]||null;
-    const std_dev  = row[4]||0;
+  try {
+    const data = rows[0].values;
+    for (let idx = 0; idx < data.length; idx++) {
+      const row = data[idx];
+      const item_no  = row[0];
+      const abc      = (row[1]||'C').toUpperCase();
+      const ADU      = row[3]||0;
+      const aduS     = row[6]||0;
+      const aduM     = row[7]||0;
+      const UC       = row[8]||0;
+      const lt_raw   = row[9]||'';
+      const ipg      = (row[10]||'').toUpperCase();
+      const OH       = row[11]||0;
+      const dropFlag = row[12]||0;
+      const BOX      = Math.max(row[13]||1, 1);
+      const excl     = row[14]||0;
+      const excReason= row[15]||null;
+      const nncr     = row[16]||0;
+      const cc       = row[17]||0;
+      const dsOnly   = row[18]||0;
+      const space    = row[19];
+      const custCnt  = row[20]||0;
+      const stockOv  = row[21]||'';
+      const date_last= row[5]||null;
+      const std_dev  = row[4]||0;
 
-    // Lead time — priority: 1) Observed LT from receipts, 2) BC Item Card, 3) 10D default
-    let lt = 10; // standard default
-    if (lt_raw) {
-      const n = parseInt(lt_raw.replace(/\D/g,''));
-      if (!isNaN(n) && n > 0) lt = n;
-    }
-    // Override with observed lead time if available (more accurate)
-    const useObservedLT = getParam('use_observed_lead_time','yes');
-    if (useObservedLT !== 'no') {
-      try {
-        const oltR = DB.exec(
-          `SELECT ROUND(AVG(actual_lt_days),0) AS avg_lt
-           FROM observed_lead_times
-           WHERE item_no=? AND actual_lt_days > 0 AND actual_lt_days <= 365`,
-          [item_no]
-        );
-        if (oltR.length && oltR[0].values.length && oltR[0].values[0][0] !== null) {
-          const obsLT = Math.round(oltR[0].values[0][0]);
-          if (obsLT > 0) lt = obsLT;
-        }
-      } catch(e) {} // table may not exist yet
-    }
-
-    const OF   = abc==='A' ? P.ofa : abc==='B' ? P.ofb : P.ofc;
-    const SS_d = abc==='A' ? P.ssa : abc==='B' ? P.ssb : P.ssc;
-    const ssMethod = getParam('ss_method','days');
-    let ss;
-    if (ssMethod === 'sl') {
-      const slKey = abc==='A'?'sl_target_a':abc==='B'?'sl_target_b':'sl_target_c';
-      const sl = getParam(slKey, abc==='A'?0.99:abc==='B'?0.97:0.95);
-      // Get XYZ class for this item to potentially use per-class override
-      const xyzR = DB.exec(`SELECT xyz_class FROM xyz_classification WHERE item_no=? AND location_code=?`,[item_no,currentLocation]);
-      const xyzClass = xyzR.length&&xyzR[0].values.length ? xyzR[0].values[0][0] : '?';
-      // Check per-class SL override
-      const slOverR = DB.exec(`SELECT target_service_level FROM service_level_params WHERE abc_class=? AND xyz_class=?`,[abc,xyzClass]);
-      const slFinal = slOverR.length&&slOverR[0].values.length ? slOverR[0].values[0][0] : sl;
-      ss = Math.max(Math.ceil(calcServiceLevelSS(std_dev||0, lt, slFinal)), 1);
-    } else {
-      ss = Math.ceil(ADU * SS_d);
-    }
-    const bin1 = Math.ceil(ADU * (lt + OF) + ss);
-    const bin2 = Math.max(Math.ceil((ADU * OF) / BOX) * BOX, P.minFloor);
-    const rop  = bin1;
-    const minQ = Math.max(bin2, P.minFloor);
-    const maxQ = bin1 + bin2;
-    const sysType = ADU > P.oneBin ? '2-BIN' : '1-BIN';
-
-    // Aging / overstock
-    let daysSince = null, agingFlag = 0, ovFlag = 0, ovRatio = 0;
-    if (date_last) {
-      daysSince = Math.floor((new Date(today) - new Date(date_last)) / 86400000);
-      if (daysSince >= P.aging) agingFlag = 1;
-    }
-    if (ADU > 0 && UC > 0) {
-      const projAnn = ADU * P.wd;
-      if (projAnn > 0) {
-        ovRatio = OH / projAnn;
-        if (ovRatio > P.ovMult) ovFlag = 1;
+      let lt = 10;
+      if (lt_raw) {
+        const n = parseInt(lt_raw.replace(/\D/g,''));
+        if (!isNaN(n) && n > 0) lt = n;
       }
-    }
+      if (useObservedLT && obsLT.has(item_no)) lt = obsLT.get(item_no);
 
-    // Stocking recommendation
-    const flags = [];
-    let rec = 'REVIEW';
-    if (ipg.includes('NON-STOCK') || ipg.includes('NON STOCK')) {
-      flags.push('IPG:NON-STOCK'); rec = 'NO-STOCK';
-    } else if (dsOnly || dropFlag) {
-      flags.push('DROP-SHIP'); rec = 'NO-STOCK';
-    } else {
-      let score = 0;
-      if (ADU > 0) {
-        if (aduS > 0 && aduM > 0) { flags.push('SALES+MFG:'+ADU.toFixed(3)); score += 3; }
-        else if (aduM > 0)         { flags.push('MFG:'+aduM.toFixed(3));      score += 2; }
-        else                        { flags.push('SALES:'+aduS.toFixed(3));    score += 2; }
-      } else { flags.push('NO-USAGE'); score -= 3; }
-      if (cc)           { flags.push('CUST-CONTRACT'); score += 3; }
-      if (nncr)         { flags.push('NNCR');          score += 1; }
-      if (custCnt >= 3) { flags.push('CUST:'+custCnt); score += 2; }
-      if (space === 0)  { flags.push('NO-SPACE');       score -= 2; }
-      if (agingFlag)    { flags.push('AGING:'+daysSince+'d'); score -= 1; }
-      if (stockOv)      { rec = stockOv; flags.push('OVERRIDE:'+stockOv); }
-      else if (score >= 2)  rec = 'STOCK';
-      else if (score <= -2) rec = 'NO-STOCK';
-    }
+      const OF   = abc==='A' ? P.ofa : abc==='B' ? P.ofb : P.ofc;
+      const SS_d = abc==='A' ? P.ssa : abc==='B' ? P.ssb : P.ssc;
+      let ss;
+      if (ssMethod === 'sl') {
+        const sl = abc==='A' ? slA : abc==='B' ? slB : slC;
+        const xyzClass = xyzMap.get(item_no) || '?';
+        const slFinal = slOverride.get(abc+'|'+xyzClass) ?? sl;
+        ss = Math.max(Math.ceil(calcServiceLevelSS(std_dev||0, lt, slFinal)), 1);
+      } else {
+        ss = Math.ceil(ADU * SS_d);
+      }
+      const bin1 = Math.ceil(ADU * (lt + OF) + ss);
+      const bin2 = Math.max(Math.ceil((ADU * OF) / BOX) * BOX, P.minFloor);
+      const rop  = bin1;
+      const minQ = Math.max(bin2, P.minFloor);
+      const maxQ = bin1 + bin2;
+      const sysType = ADU > P.oneBin ? '2-BIN' : '1-BIN';
 
-    DB.run(
-      `UPDATE item_calculator SET
-         lead_time_days=?, std_box_qty=?, order_freq_days=?,
-         adu=?, std_dev=?, adu_sales=?, adu_mfg=?,
-         ss_days=?, safety_stock=?,
-         bin1_trigger=?, bin2_replenish=?, system_type=?,
-         reorder_point=?, min_order_qty=?, max_order_qty=?,
-         stocking_recommendation=?, stocking_flags=?,
-         excluded=?, exclude_reason=?,
-         days_since_last_movement=?, aging_flag=?,
-         overstock_flag=?, overstock_ratio=?,
-         date_last_movement=?, calculated_at=datetime('now')
-       WHERE item_no=? AND location_code=?
-         AND (excluded=0 OR excluded IS NULL)`,
-      [lt, BOX, OF,
-       ADU, std_dev, aduS, aduM,
-       SS_d, ss,
-       bin1, bin2, sysType,
-       rop, minQ, maxQ,
-       rec, JSON.stringify(flags),
-       excl ? 1 : 0, excReason,
-       daysSince, agingFlag,
-       ovFlag, ovRatio,
-       date_last, item_no, currentLocation]
-    );
+      let daysSince = null, agingFlag = 0, ovFlag = 0, ovRatio = 0;
+      if (date_last) {
+        daysSince = Math.floor((new Date(today) - new Date(date_last)) / 86400000);
+        if (daysSince >= P.aging) agingFlag = 1;
+      }
+      if (ADU > 0 && UC > 0) {
+        const projAnn = ADU * P.wd;
+        if (projAnn > 0) {
+          ovRatio = OH / projAnn;
+          if (ovRatio > P.ovMult) ovFlag = 1;
+        }
+      }
+
+      const flags = [];
+      let rec = 'REVIEW';
+      if (ipg.includes('NON-STOCK') || ipg.includes('NON STOCK')) {
+        flags.push('IPG:NON-STOCK'); rec = 'NO-STOCK';
+      } else if (dsOnly || dropFlag) {
+        flags.push('DROP-SHIP'); rec = 'NO-STOCK';
+      } else {
+        let score = 0;
+        if (ADU > 0) {
+          if (aduS > 0 && aduM > 0) { flags.push('SALES+MFG:'+ADU.toFixed(3)); score += 3; }
+          else if (aduM > 0)         { flags.push('MFG:'+aduM.toFixed(3));      score += 2; }
+          else                        { flags.push('SALES:'+aduS.toFixed(3));    score += 2; }
+        } else { flags.push('NO-USAGE'); score -= 3; }
+        if (cc)           { flags.push('CUST-CONTRACT'); score += 3; }
+        if (nncr)         { flags.push('NNCR');          score += 1; }
+        if (custCnt >= 3) { flags.push('CUST:'+custCnt); score += 2; }
+        if (space === 0)  { flags.push('NO-SPACE');       score -= 2; }
+        if (agingFlag)    { flags.push('AGING:'+daysSince+'d'); score -= 1; }
+        if (stockOv)      { rec = stockOv; flags.push('OVERRIDE:'+stockOv); }
+        else if (score >= 2)  rec = 'STOCK';
+        else if (score <= -2) rec = 'NO-STOCK';
+      }
+
+      upd.run([lt, BOX, OF,
+        ADU, std_dev, aduS, aduM,
+        SS_d, ss,
+        bin1, bin2, sysType,
+        rop, minQ, maxQ,
+        rec, JSON.stringify(flags),
+        excl ? 1 : 0, excReason,
+        daysSince, agingFlag,
+        ovFlag, ovRatio,
+        date_last, item_no, currentLocation]);
+
+      if (((idx+1) % 2000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+    }
+    DB.run('COMMIT');
+  } catch(e) {
+    try { DB.run('ROLLBACK'); } catch(_) {}
+    throw e;
+  } finally {
+    upd.free();
   }
-  DB.run('COMMIT');
 }
 
 
