@@ -79,14 +79,19 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>Indelco — Inventory Intelligence v3</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.0/jspdf.plugin.autotable.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="vendor/sql-wasm.js"></script>
+<script src="vendor/papaparse.min.js"></script>
+<script src="vendor/chart.umd.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="vendor/jspdf.plugin.autotable.min.js"></script>
+<script src="vendor/xlsx.full.min.js"></script>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+@font-face{font-family:'IBM Plex Sans';font-weight:300;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-sans-300.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-weight:400;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-sans-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-weight:500;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-sans-500.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-weight:600;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-sans-600.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-weight:400;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-mono-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-weight:500;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-mono-500.woff2') format('woff2')}
 :root{--bg:#0f1117;--bg2:#171b26;--bg3:#1e2333;--bg4:#252b3d;--border:#2d3448;--border2:#3a4260;--text:#e8eaf0;--text2:#9aa3b8;--text3:#5d6680;--accent:#4d7cfe;--accent2:#6b8fff;--green:#2ec27e;--green2:#1a8050;--amber:#f5a623;--amber2:#b87e1a;--red:#e05252;--red2:#a33c3c;--purple:#a569e0;--teal:#26c4c4;--font:'IBM Plex Sans',sans-serif;--mono:'IBM Plex Mono',monospace;--r:8px;--r2:12px}
 *{box-sizing:border-box;margin:0;padding:0}html{font-size:14px}
 body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;overflow-x:hidden}
@@ -1339,7 +1344,7 @@ function dropFile(e, type) {
 
 // ── Boot ─────────────────────────────────────────────
 async function initSQL() {
-  SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${f}` });
+  SQL = await initSqlJs({ locateFile: f => `vendor/${f}` });
 
   // Try to auto-load indelco.db from local server
   updateDBStatus('Connecting to server...', false);
