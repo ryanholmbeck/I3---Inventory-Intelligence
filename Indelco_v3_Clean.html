@@ -2240,7 +2240,7 @@ function evaluateExclusionRules() {
 }
 
 // ── Apply exclusions to item_calculator before calc runs ──────────────
-async function applyExclusionRules() {
+async function applyExclusionRules(precomputed) {
   try { DB.run(`CREATE TABLE IF NOT EXISTS exclusion_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     field_name TEXT NOT NULL, operator TEXT NOT NULL,
@@ -2248,7 +2248,10 @@ async function applyExclusionRules() {
     created_at TEXT DEFAULT (datetime('now')), is_active INTEGER DEFAULT 1)`);
   } catch(e) {}
 
-  const excluded = evaluateExclusionRules();
+  // Reuse a precomputed Map when called from the all-locations loop —
+  // evaluateExclusionRules() does a full items-table scan and the result
+  // doesn't depend on the current location.
+  const excluded = precomputed || evaluateExclusionRules();
   if (!excluded.size) return 0;
 
   DB.run(`UPDATE item_calculator SET excluded=0, exclude_reason=NULL
@@ -2275,7 +2278,7 @@ async function applyExclusionRules() {
     for (const [item_no, {reason}] of excluded) {
       insertCalc.run([item_no, currentLocation, reason]);
       insertExcl.run([item_no, currentLocation, reason]);
-      if ((++i % 2000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+      if ((++i % 2000) === 0) { DB.run('COMMIT'); await tick(); DB.run('BEGIN'); }
     }
     DB.run('COMMIT');
   } catch(e) {
@@ -2703,7 +2706,7 @@ async function runXYZClassification() {
       const cov = std / adu;
       const xyz = cov <= xT ? 'X' : cov <= yT ? 'Y' : 'Z';
       stmt.run([item, currentLocation, xyz, cov]);
-      if (((i+1) % 5000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+      if (((i+1) % 5000) === 0) { DB.run('COMMIT'); await tick(); DB.run('BEGIN'); }
     }
     DB.run('COMMIT');
   } catch(e) {
@@ -4522,6 +4525,9 @@ function renderParams() {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// Yield for a real paint — Edge's "page unresponsive" detector resets only
+// after the page actually repaints, which setTimeout(0) alone doesn't guarantee.
+function tick() { return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0))); }
 
 async function runCalculationsAllLocations() {
   if (!DB) return toast('No database loaded','error');
@@ -4534,23 +4540,30 @@ async function runCalculationsAllLocations() {
     const origLoc = currentLocation;
     let total = 0;
     const t0 = performance.now();
+
+    // Precompute exclusion rules ONCE — full items scan is location-independent.
+    let exclMap;
+    try { exclMap = evaluateExclusionRules(); } catch(e) { exclMap = new Map(); }
+    await tick();
+
     for (let i = 0; i < locList.length; i++) {
       const loc = locList[i];
       currentLocation = loc;
       if (btn) btn.textContent = `⏳ ${i+1}/${locList.length} · ${loc}`;
       toast(`Location ${i+1}/${locList.length}: ${loc}`, 'info');
-      await sleep(0);
+      await tick();
       try {
-        await aggregateILE();
-        await calculateABC();
-        await computeCalculator();
-        await runXYZClassification();
-        await applyExclusionRules();
+        await aggregateILE();         await tick();
+        await calculateABC();         await tick();
+        await computeCalculator();    await tick();
+        await runXYZClassification(); await tick();
+        await applyExclusionRules(exclMap);
         total++;
       } catch(e) {
         console.error(`Failed for ${loc}:`, e);
         toast(`⚠ ${loc} failed: ${e.message}`, 'error');
       }
+      await tick();
     }
     currentLocation = origLoc;
     refreshDashboard();
@@ -4572,19 +4585,19 @@ async function runCalculations() {
   btn.textContent='⏳ Running...'; btn.disabled=true;
   try {
     toast('Step 1/5: Aggregating ILE + detecting spikes...','info');
-    await sleep(0);
+    await tick();
     await aggregateILE();
     toast('Step 2/5: ABC classification...','info');
-    await sleep(0);
+    await tick();
     await calculateABC();
     toast('Step 3/5: Computing ROP/Min/Max...','info');
-    await sleep(0);
+    await tick();
     await computeCalculator();
     toast('Step 4/5: XYZ classification...','info');
-    await sleep(0);
+    await tick();
     await runXYZClassification();
     toast('Step 5/5: Applying exclusion rules...','info');
-    await sleep(0);
+    await tick();
     const exclCount = await applyExclusionRules();
     if (exclCount > 0) toast(`${exclCount.toLocaleString()} items excluded by rules`,'info');
     try {
@@ -4638,6 +4651,11 @@ async function aggregateILE() {
   const MFG_TYPES   = ['Consumption','5','Assembly Consumption','7'];
   const ALL_QUOTED  = [...SALE_TYPES,...MFG_TYPES].map(t=>"'"+t+"'").join(',');
 
+  // The big one — single unyielded WASM call. Flank with paint yields so Edge
+  // sees the page as alive across it.
+  const btn = document.getElementById('calcBtn');
+  if (btn) btn.textContent = `⏳ ${currentLocation} · loading ILE…`;
+  await tick();
   const rows = DB.exec(
     `SELECT t.item_no, ABS(t.quantity) AS qty, t.posting_date, t.entry_type,
             t.document_no, t.order_no, t.source_no,
@@ -4648,6 +4666,7 @@ async function aggregateILE() {
      AND t.location_code=? AND t.posting_date>=?`,
     [currentLocation, cutoffStr]
   );
+  await tick();
 
   if (!rows.length || !rows[0].values.length) {
     toast('No demand transactions found for '+currentLocation+' — check ILE data','error');
@@ -4735,7 +4754,7 @@ async function aggregateILE() {
       }
 
       if ((++i % 1000) === 0) {
-        DB.run('COMMIT'); await sleep(0); DB.run('BEGIN');
+        DB.run('COMMIT'); await tick(); DB.run('BEGIN');
       }
     }
     DB.run('COMMIT');
@@ -4789,7 +4808,7 @@ async function calculateABC() {
       cum += (spend || 0);
       const abc = cum/totalSpend <= aT ? 'A' : cum/totalSpend <= bT ? 'B' : 'C';
       stmt.run([item, currentLocation, abc, i+1, spend||0]);
-      if (((i+1) % 2000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+      if (((i+1) % 2000) === 0) { DB.run('COMMIT'); await tick(); DB.run('BEGIN'); }
     }
     DB.run('COMMIT');
   } catch(e) {
@@ -4999,7 +5018,7 @@ async function computeCalculator() {
         ovFlag, ovRatio,
         date_last, item_no, currentLocation]);
 
-      if (((idx+1) % 2000) === 0) { DB.run('COMMIT'); await sleep(0); DB.run('BEGIN'); }
+      if (((idx+1) % 2000) === 0) { DB.run('COMMIT'); await tick(); DB.run('BEGIN'); }
     }
     DB.run('COMMIT');
   } catch(e) {
