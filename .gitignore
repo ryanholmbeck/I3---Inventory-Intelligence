@@ -1,0 +1,26 @@
+# SQLite databases — user data, lives only on the local machine
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# CSV exports from SSMS / BC pulls
+*.csv
+
+# Historical / legacy data staging
+historical/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor noise
+.vscode/
+.idea/
+*.swp

@@ -14,7 +14,17 @@ from pathlib import Path
 PORT = 8765
 BASE_DIR = Path(__file__).parent
 DB_FILE  = BASE_DIR / 'indelco.db'
+HIST_DB_FILE = BASE_DIR / 'indelco_historical.db'
 HTML_FILE = BASE_DIR / 'Indelco_v3_Clean.html'
+
+def _serve_db(handler, path):
+    data = path.read_bytes()
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'application/octet-stream')
+    handler.send_header('Content-Length', str(len(data)))
+    handler.send_header('Cache-Control', 'no-cache')
+    handler.end_headers()
+    handler.wfile.write(data)
 
 class IndelcoHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -26,22 +36,28 @@ class IndelcoHandler(http.server.SimpleHTTPRequestHandler):
             if not DB_FILE.exists():
                 self.send_error(404, 'Database not built yet — run build_db.py first')
                 return
-            data = DB_FILE.read_bytes()
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/octet-stream')
-            self.send_header('Content-Length', str(len(data)))
-            self.send_header('Cache-Control', 'no-cache')
-            self.end_headers()
-            self.wfile.write(data)
+            _serve_db(self, DB_FILE)
+            return
+
+        # Serve indelco_historical.db (static legacy snapshot) — 404 is OK if absent
+        if self.path == '/indelco_historical.db':
+            if not HIST_DB_FILE.exists():
+                self.send_error(404, 'No historical database present — drop indelco_historical.db next to server.py to enable')
+                return
+            _serve_db(self, HIST_DB_FILE)
             return
 
         # Status endpoint
         if self.path == '/status':
             db_size = DB_FILE.stat().st_size if DB_FILE.exists() else 0
+            hist_size = HIST_DB_FILE.stat().st_size if HIST_DB_FILE.exists() else 0
             status = {
                 'db_exists': DB_FILE.exists(),
                 'db_size_mb': round(db_size/1024/1024, 1),
                 'db_modified': DB_FILE.stat().st_mtime if DB_FILE.exists() else None,
+                'hist_db_exists': HIST_DB_FILE.exists(),
+                'hist_db_size_mb': round(hist_size/1024/1024, 1),
+                'hist_db_modified': HIST_DB_FILE.stat().st_mtime if HIST_DB_FILE.exists() else None,
             }
             data = json.dumps(status).encode()
             self.send_response(200)
@@ -73,6 +89,8 @@ def start_server():
     with socketserver.TCPServer(('', PORT), IndelcoHandler) as httpd:
         print(f'Indelco server running at http://localhost:{PORT}')
         print(f'DB path: {DB_FILE}')
+        if HIST_DB_FILE.exists():
+            print(f'Historical DB: {HIST_DB_FILE}')
         print(f'Press Ctrl+C to stop\n')
         try:
             httpd.serve_forever()
