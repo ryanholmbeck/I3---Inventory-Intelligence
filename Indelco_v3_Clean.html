@@ -1371,9 +1371,14 @@ async function loadFromLocalServer() {
   const res = await fetch('/indelco.db', {cache: 'no-cache'});
   if (!res.ok) throw new Error(`server.py returned ${res.status}`);
   const buf = await res.arrayBuffer();
+  if (!buf || buf.byteLength < 1024) throw new Error('indelco.db is empty or missing');
   DB = new SQL.Database(new Uint8Array(buf));
-  const meta = DB.exec(`SELECT value FROM db_meta WHERE key='merged_at'`);
-  const ts = meta.length && meta[0].values.length ? meta[0].values[0][0] : 'unknown';
+  // db_meta is best-effort: older DBs may not have it. Don't fail the load.
+  let ts = 'unknown';
+  try {
+    const meta = DB.exec(`SELECT value FROM db_meta WHERE key='merged_at'`);
+    if (meta.length && meta[0].values.length) ts = String(meta[0].values[0][0] || 'unknown');
+  } catch(_) {}
   updateDBStatus(`Live · refreshed ${ts.slice(0,16)}`, true);
   toast('Database loaded from server ✓', 'success');
 }
@@ -1402,27 +1407,53 @@ async function loadFromBCAPI() {
 
 // ── Boot ─────────────────────────────────────────────
 async function initSQL() {
-  SQL = await initSqlJs({ locateFile: f => `vendor/${f}` });
+  // Catastrophic case: vendor/sql-wasm.js didn't load → initSqlJs undefined.
+  if (typeof initSqlJs !== 'function') {
+    updateDBStatus('sql.js failed to load (check vendor/ folder)', false);
+    toast('Could not load vendor/sql-wasm.js — is the vendor/ folder present next to the HTML?', 'error');
+    return;
+  }
+
+  try {
+    SQL = await initSqlJs({ locateFile: f => `vendor/${f}` });
+  } catch (e) {
+    updateDBStatus('sql.js init failed', false);
+    toast(`sql.js init failed: ${e.message}`, 'error');
+    console.error(e);
+    return;
+  }
 
   const sourceKey = getDataSource();
   const source = DATA_SOURCES[sourceKey] || DATA_SOURCES['local-db'];
   updateDBStatus(`Connecting · ${source.label}...`, false);
 
   let loaded = false;
-  try {
-    await source.load();
-    loaded = true;
-  } catch (e) {
-    console.warn(`Data source "${sourceKey}" failed:`, e);
-    // If a non-default source fails, fall back to local-db so the user
-    // isn't stranded.
-    if (sourceKey !== 'local-db') {
-      try {
-        toast(`${source.label} unavailable — trying local-db`, 'info');
-        await loadFromLocalServer();
-        loaded = true;
-      } catch (e2) { console.warn('local-db fallback also failed:', e2); }
+  let lastError = null;
+  // Open_App.bat starts the browser 2s after launching server.py. On a slow
+  // box Python may still be coming up — retry the local-db fetch a couple
+  // of times before giving up so the user doesn't see "stalled" on a race.
+  const attempts = sourceKey === 'local-db' ? 4 : 1;
+  for (let i = 1; i <= attempts && !loaded; i++) {
+    try {
+      await source.load();
+      loaded = true;
+    } catch (e) {
+      lastError = e;
+      console.warn(`Data source "${sourceKey}" attempt ${i}/${attempts} failed:`, e);
+      if (i < attempts) {
+        updateDBStatus(`Waiting for server (try ${i}/${attempts})...`, false);
+        await new Promise(r => setTimeout(r, 1500));
+      }
     }
+  }
+
+  // If a non-default source failed entirely, try local-db as fallback.
+  if (!loaded && sourceKey !== 'local-db') {
+    try {
+      toast(`${source.label} unavailable — falling back to local-db`, 'info');
+      await loadFromLocalServer();
+      loaded = true;
+    } catch (e2) { lastError = e2; }
   }
 
   if (!loaded) {
@@ -1430,7 +1461,9 @@ async function initSQL() {
     buildSchema();
     seedBuyerXref();
     seedParams();
-    updateDBStatus('No data loaded — see Dashboard prompt', false);
+    const msg = lastError ? `Server unreachable: ${lastError.message}` : 'No data loaded';
+    updateDBStatus(msg, false);
+    toast(msg + ' — start server.py or use the 📂 Load button', 'error');
   }
 
   loadRulesFromStorage();
