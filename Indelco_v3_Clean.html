@@ -3469,11 +3469,29 @@ function renderScorecard() {
 
 // ── Per-vendor row computation ─────────────────────────────────────
 function _computeVendorRows(startDate, endDate, dropClause, buyerClause) {
-  // Pull all receipts in period from observed_lead_times joined to purchase_orders for filters
-  // Then aggregate per-vendor
+  // Spend is sourced from value_entries (BC's financial ledger), NOT
+  // observed_lead_times. OLT carries qty_received × unit_cost per receipt
+  // line, but its underlying join (Purch Rcpt × Purchase Line Archive)
+  // can fan out 2-5× per vendor when the same item appears on multiple
+  // archived PO lines — inflating spend by exactly that factor. We
+  // diagnosed this with diag_spend.py: OLT showed $27.96M for GFI1 vs
+  // value_entries' $6.92M, the latter within ~15% of the ground truth.
+  // Operational metrics (OTD, lead time, fill rate, days variance)
+  // remain OLT-driven — that's the right source for those.
   let rows = [];
   try {
     const sql = `
+      WITH vendor_spend AS (
+        SELECT source_no AS vendor_no,
+               SUM(cost_amount_actual) AS spend
+        FROM value_entries
+        WHERE posting_date BETWEEN ? AND ?
+          -- BC enum code 0 = Purchase. Accept the text label too in case
+          -- a future data source emits captions instead of codes.
+          AND ile_entry_type IN ('0', 'Purchase', 0)
+          AND source_no IS NOT NULL AND source_no != ''
+        GROUP BY source_no
+      )
       SELECT
         o.vendor_no,
         COALESCE(v.name, o.vendor_no) AS vendor_name,
@@ -3486,19 +3504,20 @@ function _computeVendorRows(startDate, endDate, dropClause, buyerClause) {
         AVG(CASE WHEN o.days_variance > ${QBR_GRACE_DAYS} THEN o.days_variance END) AS avg_days_late_only,
         AVG(o.days_variance) AS avg_days_var,
         AVG(o.actual_lt_days) AS avg_lt_days,
-        SUM(o.qty_received * o.unit_cost) AS spend
+        COALESCE(vs.spend, 0) AS spend
       FROM observed_lead_times o
       LEFT JOIN vendors v ON v.vendor_no = o.vendor_no
       LEFT JOIN (
         -- Deduplicate purchase_orders to one row per (po_no, item_no).
         -- Without this collapse, split PO lines fan the OLT row out N times
-        -- and SUM(qty_received * unit_cost) overcounts spend by ~Nx.
+        -- and the on-time / late / committed counts above get inflated too.
         SELECT po_no, item_no,
                MAX(COALESCE(drop_shipment, 0)) AS drop_shipment,
                MAX(COALESCE(purchaser_code, '')) AS purchaser_code
         FROM purchase_orders
         GROUP BY po_no, item_no
       ) p ON p.po_no = o.po_no AND p.item_no = o.item_no
+      LEFT JOIN vendor_spend vs ON vs.vendor_no = o.vendor_no
       WHERE o.actual_receipt_date >= ? AND o.actual_receipt_date <= ?
         AND o.vendor_no IS NOT NULL AND o.vendor_no != ''
         AND o.actual_lt_days > 0 AND o.actual_lt_days <= 365
@@ -3506,7 +3525,9 @@ function _computeVendorRows(startDate, endDate, dropClause, buyerClause) {
         ${buyerClause}
       GROUP BY o.vendor_no
       ORDER BY spend DESC`;
-    const r = DB.exec(sql, [startDate, endDate]);
+    // Note: vendor_spend CTE takes start/end first, then the OLT WHERE
+    // clause uses them again. Bind both pairs.
+    const r = DB.exec(sql, [startDate, endDate, startDate, endDate]);
     if (r.length && r[0].values.length) {
       rows = r[0].values.map(v => ({
         vendor_no: v[0],
@@ -4001,7 +4022,7 @@ function exportScorecardXLSX() {
   const meth = [
     ['QBR Methodology'], [],
     ['Metric','Definition'],
-    ['SPEND','Total $ paid this period (qty_received × unit_cost from observed_lead_times)'],
+    ['SPEND','Total $ posted to vendor GL this period (value_entries.cost_amount_actual where ile_entry_type=Purchase). Financial-ledger source, not receipt-log derived.'],
     ['OTD %','Lines on time within 2-day grace of committed delivery date'],
     ['FILL RATE','On-time receipts / total lines (includes lines with no commit)'],
     ['AVG DAYS LATE','Average variance for lines arriving >2 days past commit'],
