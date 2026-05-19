@@ -56,11 +56,16 @@ def session():
 
 
 # ── OData paging ──────────────────────────────────────────────────────
+class BCRequestError(Exception):
+    """Permanent BC error (4xx/5xx). Raised so write_csv can save the partial."""
+
+
 def _get_with_retry(s, url, params=None):
     """GET with retry on transient ReadTimeout / ConnectionError.
 
-    HTTP 4xx/5xx are NOT retried — those are permanent (auth, malformed
-    query, server bug) and retrying just wastes time.
+    HTTP 4xx/5xx are NOT retried (permanent: auth, malformed query, server
+    cancellation). They raise BCRequestError, which write_csv catches and
+    converts into a partial-save instead of losing all in-flight rows.
     """
     last_err = None
     for attempt in range(MAX_RETRIES):
@@ -68,7 +73,9 @@ def _get_with_retry(s, url, params=None):
             r = s.get(url, params=params, timeout=HTTP_TIMEOUT)
             if r.status_code == 200:
                 return r
-            sys.exit(f"  HTTP {r.status_code} on {url}\n  body: {r.text[:400]}")
+            raise BCRequestError(
+                f"HTTP {r.status_code} on {url}\n  body: {r.text[:400]}"
+            )
         except (requests.Timeout, requests.ConnectionError) as e:
             last_err = e
             if attempt < MAX_RETRIES - 1:
@@ -79,7 +86,12 @@ def _get_with_retry(s, url, params=None):
 
 
 def fetch_all(s, path, params=None):
-    """Walk every page of a BC OData4 collection. Yields records one at a time."""
+    """Walk every page of a BC OData4 collection via @odata.nextLink.
+
+    Works for tables where BC's native paging stays fast (Locations, ItemList,
+    CustomerCard, SKU with orderby). For ILE-sized tables that degrade page
+    by page, use fetch_by_key_range instead.
+    """
     url = f"{BC_BASE}/{path}"
     first = True
     page = 0
@@ -99,6 +111,57 @@ def fetch_all(s, path, params=None):
             elapsed = time.time() - t0
             rate = total / elapsed if elapsed else 0
             print(f"      page {page}: {total:,} rows  ({rate:,.0f}/s)")
+
+
+def fetch_by_key_range(s, path, key_field, base_filter, select_fields,
+                       batch_size=20000, start_from=0):
+    """Manual paging by a monotonically-increasing key (primary key works best).
+
+    BC's native @odata.nextLink slows down as $skiptoken digs deeper into the
+    result set — large tables (ILE) hit BC's 8-minute query timeout before
+    finishing. This approach asks for the next batch by `{key_field} gt X`
+    instead, which BC can serve from its primary-key index in O(log n)
+    regardless of how deep we are.
+
+    Args:
+        path: OData collection name (e.g. 'ILE')
+        key_field: BC field name to range-page by (must be monotonic — Entry_No)
+        base_filter: extra $filter clause (e.g. date range). Combined with AND.
+        select_fields: list of BC field names for $select
+        batch_size: $top per request
+        start_from: initial value of {key_field}; we ask for > this
+    """
+    last_key = start_from
+    page = 0
+    total = 0
+    t0 = time.time()
+    while True:
+        page += 1
+        filter_clause = f"{key_field} gt {last_key}"
+        if base_filter:
+            filter_clause = f"{base_filter} and {filter_clause}"
+        params = {
+            '$filter':  filter_clause,
+            '$select':  ','.join(select_fields),
+            '$orderby': key_field,
+            '$top':     str(batch_size),
+        }
+        r = _get_with_retry(s, f"{BC_BASE}/{path}", params=params)
+        rows = r.json().get('value', [])
+        if not rows:
+            break
+        total += len(rows)
+        for rec in rows:
+            yield rec
+        last_key = rows[-1].get(key_field)
+        if last_key is None:
+            raise BCRequestError(f"key_field '{key_field}' missing from response")
+        if page == 1 or len(rows) < batch_size or page % 5 == 0:
+            elapsed = time.time() - t0
+            rate = total / elapsed if elapsed else 0
+            print(f"      batch {page}: {total:,} rows  ({rate:,.0f}/s, last {key_field}={last_key})")
+        if len(rows) < batch_size:
+            break
 
 
 def clean(v):
@@ -126,7 +189,8 @@ def write_csv(rows, headers, filename):
             for r in rows:
                 w.writerow({h: clean(r.get(h, '')) for h in headers})
                 n += 1
-        except (requests.Timeout, requests.ConnectionError, requests.RequestException) as e:
+        except (requests.Timeout, requests.ConnectionError,
+                requests.RequestException, BCRequestError) as e:
             error = e
 
     if error is None:
@@ -283,18 +347,19 @@ def pull_ile(s, years_back=ILE_YEARS_BACK):
         'Global Dimension 2 Code': 'Global_Dimension_2_Code',
         'Company Source':     None,   # we tag this ourselves below
     }
-    # Only request the BC fields we map (ILE has 64; we use ~20). Order
-    # by Entry_No so BC pages stably — without orderby, BC may rescan the
-    # whole table per page on a date-filtered query and time out at 120s.
+    # ILE is millions of rows over a 4-year window. BC's native nextLink
+    # paging degrades quadratically — page 1 runs at 500 rows/s, page 15
+    # at 60 rows/s, then HTTP 408 at BC's 8-minute query timeout. Manual
+    # key-range paging by Entry_No (the primary key) stays O(log n) per
+    # batch regardless of how deep we are.
     bc_fields = [v for v in mapping.values() if v]
-    params = {
-        '$filter':  f"Posting_Date ge {cutoff}",
-        '$select':  ','.join(bc_fields),
-        '$orderby': 'Entry_No',
-    }
 
     def gen():
-        for r in fetch_all(s, 'ILE', params=params):
+        for r in fetch_by_key_range(
+                s, 'ILE',
+                key_field='Entry_No',
+                base_filter=f"Posting_Date ge {cutoff}",
+                select_fields=bc_fields):
             row = {csv_h: (r.get(bc_f) if bc_f else '') for csv_h, bc_f in mapping.items()}
             row['Company Source'] = COMPANY_SHORT
             yield row
