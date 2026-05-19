@@ -40,7 +40,8 @@ EXPORTS_DIR = BASE_DIR / 'BC_Exports'
 BC_BASE     = "http://Indelco-BC2:9048/BC270PROD/ODataV4/Company('Indelco%20Plastics')"
 COMPANY_SHORT = 'INDELCO'   # matches SSMS_Connector COMPANIES['Indelco Plastics']
 ILE_YEARS_BACK = 4
-HTTP_TIMEOUT = 120          # bigger endpoints can take a while; allow it
+HTTP_TIMEOUT = 600          # BC's mid-query page assembly can take minutes on big tables
+MAX_RETRIES  = 3            # transient ReadTimeout / ConnectionError — backoff between tries
 
 
 def today_stamp():
@@ -55,6 +56,28 @@ def session():
 
 
 # ── OData paging ──────────────────────────────────────────────────────
+def _get_with_retry(s, url, params=None):
+    """GET with retry on transient ReadTimeout / ConnectionError.
+
+    HTTP 4xx/5xx are NOT retried — those are permanent (auth, malformed
+    query, server bug) and retrying just wastes time.
+    """
+    last_err = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = s.get(url, params=params, timeout=HTTP_TIMEOUT)
+            if r.status_code == 200:
+                return r
+            sys.exit(f"  HTTP {r.status_code} on {url}\n  body: {r.text[:400]}")
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = e
+            if attempt < MAX_RETRIES - 1:
+                backoff = 2 ** attempt
+                print(f"      {type(e).__name__} — retry {attempt+1}/{MAX_RETRIES} in {backoff}s")
+                time.sleep(backoff)
+    raise last_err
+
+
 def fetch_all(s, path, params=None):
     """Walk every page of a BC OData4 collection. Yields records one at a time."""
     url = f"{BC_BASE}/{path}"
@@ -64,9 +87,7 @@ def fetch_all(s, path, params=None):
     t0 = time.time()
     while url:
         page += 1
-        r = s.get(url, params=params if first else None, timeout=HTTP_TIMEOUT)
-        if r.status_code != 200:
-            sys.exit(f"  HTTP {r.status_code} on {url}\n  body: {r.text[:400]}")
+        r = _get_with_retry(s, url, params=params if first else None)
         body = r.json()
         rows = body.get('value', [])
         total += len(rows)
@@ -89,20 +110,35 @@ def clean(v):
 
 # ── CSV writing ───────────────────────────────────────────────────────
 def write_csv(rows, headers, filename):
-    """Atomic write so a half-finished pull never leaves a corrupt CSV."""
+    """Stream rows to a temp CSV; on success rename to final, on failure
+    keep the partial under a `.csv.partial` suffix so progress isn't lost.
+    build_db.py globs for *.csv so the `.partial` extension keeps half-built
+    files from being picked up accidentally."""
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
     final = EXPORTS_DIR / filename
     tmp   = final.with_suffix(final.suffix + '.tmp')
     n = 0
+    error = None
     with tmp.open('w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=headers, extrasaction='ignore')
         w.writeheader()
-        for r in rows:
-            w.writerow({h: clean(r.get(h, '')) for h in headers})
-            n += 1
-    tmp.replace(final)
-    print(f"      wrote {n:,} rows → {final.name}")
-    return n
+        try:
+            for r in rows:
+                w.writerow({h: clean(r.get(h, '')) for h in headers})
+                n += 1
+        except (requests.Timeout, requests.ConnectionError, requests.RequestException) as e:
+            error = e
+
+    if error is None:
+        tmp.replace(final)
+        print(f"      wrote {n:,} rows → {final.name}")
+        return n
+
+    partial = final.parent / (final.name + '.partial')
+    partial.unlink(missing_ok=True)
+    tmp.replace(partial)
+    print(f"      PARTIAL: {n:,} rows → {partial.name}  ({type(error).__name__})")
+    raise error
 
 
 def map_row(rec, mapping):
@@ -162,8 +198,13 @@ def pull_items(s):
         'Sales Blocked':           None,
         'Purchasing Blocked':      None,
     }
+    # Only request the BC fields we actually map — saves a lot of bandwidth
+    # since ItemList returns 70 fields per row by default.
+    bc_fields = [v for v in mapping.values() if v]
     params = {
         '$filter': "Blocked eq false and Type eq 'Inventory'",
+        '$select': ','.join(bc_fields),
+        '$orderby': 'No',
     }
     def gen():
         for r in fetch_all(s, 'ItemList', params=params):
@@ -175,20 +216,25 @@ def pull_items(s):
 
 def pull_qoh_from_sku(s):
     """SKU.Inventory → QoH CSV. SKU already has Inventory per Item × Location,
-    so we don't need to GROUP BY ILE the way the SSMS pull does."""
+    so we don't need to GROUP BY ILE the way the SSMS pull does.
+
+    Server-side filtering and projection — SKU has 38 fields, we transfer 3.
+    $orderby on the composite key keeps BC from re-scanning the table on
+    each page (which is what was causing the 120s timeouts).
+    """
     print("  QoH (from SKU)...")
     mapping = {
         'Item No.':      'Item_No',
         'Location Code': 'Location_Code',
         'Qty on Hand':   'Inventory',
     }
-    def gen():
-        for r in fetch_all(s, 'SKU'):
-            if r.get('Variant_Code'):
-                # SSMS QoH ignores variants — sum into the no-variant row
-                continue
-            yield map_row(r, mapping)
-    return write_csv(gen(), list(mapping),
+    params = {
+        '$filter':  "Variant_Code eq ''",
+        '$select':  'Item_No,Location_Code,Inventory',
+        '$orderby': 'Item_No,Location_Code',
+    }
+    rows = (map_row(r, mapping) for r in fetch_all(s, 'SKU', params=params))
+    return write_csv(rows, list(mapping),
                      f'QoH_{COMPANY_SHORT}_{today_stamp()}.csv')
 
 
@@ -237,7 +283,15 @@ def pull_ile(s, years_back=ILE_YEARS_BACK):
         'Global Dimension 2 Code': 'Global_Dimension_2_Code',
         'Company Source':     None,   # we tag this ourselves below
     }
-    params = {'$filter': f"Posting_Date ge {cutoff}"}
+    # Only request the BC fields we map (ILE has 64; we use ~20). Order
+    # by Entry_No so BC pages stably — without orderby, BC may rescan the
+    # whole table per page on a date-filtered query and time out at 120s.
+    bc_fields = [v for v in mapping.values() if v]
+    params = {
+        '$filter':  f"Posting_Date ge {cutoff}",
+        '$select':  ','.join(bc_fields),
+        '$orderby': 'Entry_No',
+    }
 
     def gen():
         for r in fetch_all(s, 'ILE', params=params):
