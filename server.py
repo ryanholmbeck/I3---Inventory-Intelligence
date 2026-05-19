@@ -30,6 +30,23 @@ class IndelcoHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BASE_DIR), **kwargs)
 
+    def end_headers(self):
+        # Force fresh HTML/CSS/JS so code changes show up on next refresh
+        # without a hard-reload dance. Vendor libraries (vendor/) are
+        # exempt — they don't change between commits and caching them
+        # is what keeps the app fast on cold-start.
+        p = self.path.lower()
+        is_app_code = (
+            p.endswith('.html')
+            or (p.endswith('.js')  and '/vendor/' not in p)
+            or (p.endswith('.css') and '/vendor/' not in p)
+        )
+        if is_app_code:
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+        super().end_headers()
+
     def do_GET(self):
         # Serve indelco.db as binary
         if self.path == '/indelco.db':
