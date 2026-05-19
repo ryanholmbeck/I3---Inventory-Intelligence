@@ -204,36 +204,11 @@ def main():
             print(f"WARN: value_entries query failed ({e})")
     step(f"  done in {time.time()-t0:.1f}s")
 
-    # ── 4. ILE-derived spend — sums value_entries via ile_entry_no join
-    # Scoped to requested vendors first via ile_transactions, then joined
-    # to value_entries on entry_no. Without the vendor scope this is a
-    # 1.6M × 3.7M nested join that takes minutes on an unindexed DB.
-    step("ILE→VE spend (ile_transactions.entry_no → value_entries.ile_entry_no)")
-    t0 = time.time()
-    ile_vendor_in = ''
-    ile_vendor_params = []
-    if args.vendors:
-        upper = [v.upper() for v in args.vendors]
-        ph = ','.join('?' for _ in upper)
-        ile_vendor_in = f' AND t.source_no IN ({ph})'
-        ile_vendor_params = upper
-    ile_sql = f"""
-        SELECT t.source_no AS vendor_no,
-               SUM(COALESCE(ve.cost_amount_actual, 0)) AS spend_ile_via_ve
-        FROM ile_transactions t
-        LEFT JOIN value_entries ve ON ve.ile_entry_no = t.entry_no
-        WHERE t.posting_date BETWEEN ? AND ?
-          AND t.entry_type = 'Purchase'
-          AND t.source_no IS NOT NULL AND t.source_no != ''
-          {ile_vendor_in}
-        GROUP BY t.source_no
-    """
-    try:
-        po_spend = dict(con.execute(ile_sql, [start, end] + ile_vendor_params))
-    except sqlite3.OperationalError as e:
-        print(f"WARN: ILE+VE query failed ({e})")
-        po_spend = {}
-    step(f"  done in {time.time()-t0:.1f}s")
+    # (Removed the ILE→VE cross-check query — without an index on
+    # value_entries.ile_entry_no it's a 1.6M × 3.7M nested scan that
+    # hangs the diagnostic. Val.Entries alone is sufficient; the index
+    # for re-enabling this cross-check is added in build_schema().)
+    po_spend = {}
 
     # ── Pick vendors to display ─────────────────────────────────────────
     if args.vendors:
@@ -243,14 +218,14 @@ def main():
 
     # ── Print side-by-side ──────────────────────────────────────────────
     h = (f"{'Vendor':<10s} {'OLT rows':>9s} {'unique':>8s} {'×dup':>6s}  "
-         f"{'OLT raw':>12s} {'OLT dedup':>12s} {'Val.Entries':>12s} {'ILE→VE':>12s}")
+         f"{'OLT raw':>12s} {'OLT dedup':>12s} {'Val.Entries':>12s}")
     print(h)
     print('-' * len(h))
     for v in targets:
         n, u, df = dup_map.get(v, (0, 0, None))
         print(f"{v:<10s} {n:>9,d} {u:>8,d} {(df or 1):>6.2f}  "
               f"{fmt(olt_raw.get(v)):>12s} {fmt(olt_dedup.get(v)):>12s} "
-              f"{fmt(ve_spend.get(v)):>12s} {fmt(po_spend.get(v)):>12s}")
+              f"{fmt(ve_spend.get(v)):>12s}")
     print()
     print("Reading the table:")
     print("  ×dup        = OLT rows / unique (receipt × item).  1.00 = no dup.")
@@ -259,11 +234,8 @@ def main():
     print("  Val.Entries = SUM(value_entries.cost_amount_actual) where")
     print(f"                ile_entry_type = {repr(purchase_code)}  (auto-detected).")
     print("                Financial-ledger truth — what posted to vendor's GL.")
-    print("  ILE→VE      = same dollars reached by joining ile_transactions to")
-    print("                value_entries on entry_no. Should match Val.Entries if")
-    print("                source_no is consistent across the two tables.")
     print()
-    print("If Val.Entries (or ILE→VE) ≈ your ground truth → that's the right source.")
+    print("If Val.Entries ≈ your ground truth → that's the right source.")
     print("Likely fix: switch the scorecard's spend column to value_entries and")
     print("keep observed_lead_times for LT / OTD / fill-rate metrics only.")
 

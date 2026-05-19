@@ -213,6 +213,12 @@ def build_schema(conn):
 
     CREATE INDEX IF NOT EXISTS idx_ve_item ON value_entries(item_no);
     CREATE INDEX IF NOT EXISTS idx_ve_date ON value_entries(posting_date);
+    -- Joining ile_transactions → value_entries on entry_no is the canonical
+    -- way to compute purchase spend in BC. Without an index here, that join
+    -- is a 1.6M × 3.7M nested scan that takes minutes.
+    CREATE INDEX IF NOT EXISTS idx_ve_ile_entry_no ON value_entries(ile_entry_no);
+    CREATE INDEX IF NOT EXISTS idx_ve_type ON value_entries(ile_entry_type);
+    CREATE INDEX IF NOT EXISTS idx_ve_source ON value_entries(source_no);
 
     DROP TABLE IF EXISTS purchase_orders;
     CREATE TABLE IF NOT EXISTS purchase_orders (
