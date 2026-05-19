@@ -77,6 +77,28 @@ def main():
 
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
 
+    # ── Probe: what does ile_entry_type look like in value_entries? ─────
+    # SSMS may export the BC enum as the integer (0=Purchase, 1=Sale, etc.)
+    # or as the text label depending on the driver. We have to discover it.
+    probe = list(con.execute("""
+        SELECT ile_entry_type, COUNT(*) AS n
+        FROM value_entries
+        GROUP BY ile_entry_type
+        ORDER BY n DESC
+        LIMIT 10
+    """))
+    print("value_entries.ile_entry_type distribution:")
+    for v, n in probe:
+        print(f"  {repr(v):>20s}  {n:>12,d}")
+    print()
+
+    # Pick the value that means "Purchase". BC int code is 0; text is 'Purchase'.
+    candidates = ['Purchase', 'purchase', '0', 0]
+    purchase_code = next((v for v, _ in probe if v in candidates), None)
+    print(f"Using purchase code: {repr(purchase_code)}" if purchase_code is not None
+          else "WARN: couldn't auto-detect a 'Purchase' value in ile_entry_type")
+    print()
+
     # ── OLT duplication factor per vendor ───────────────────────────────
     dup_sql = """
         SELECT vendor_no,
@@ -123,32 +145,40 @@ def main():
     """
     olt_dedup = dict(con.execute(dedup_sql, (start, end)))
 
-    # ── 3. Value entries — financial-ledger truth
-    ve_sql = """
-        SELECT source_no, SUM(cost_amount_actual)
-        FROM value_entries
-        WHERE posting_date BETWEEN ? AND ?
-          AND ile_entry_type = 'Purchase'
-          AND source_no IS NOT NULL AND source_no != ''
-        GROUP BY source_no
-    """
-    try:
-        ve_spend = dict(con.execute(ve_sql, (start, end)))
-    except sqlite3.OperationalError as e:
-        print(f"WARN: value_entries query failed ({e}); skipping that column")
-        ve_spend = {}
+    # ── 3. Value entries — financial-ledger truth ─────────────────────
+    ve_spend = {}
+    if purchase_code is not None:
+        ve_sql = """
+            SELECT source_no, SUM(cost_amount_actual)
+            FROM value_entries
+            WHERE posting_date BETWEEN ? AND ?
+              AND ile_entry_type = ?
+              AND source_no IS NOT NULL AND source_no != ''
+            GROUP BY source_no
+        """
+        try:
+            ve_spend = dict(con.execute(ve_sql, (start, end, purchase_code)))
+        except sqlite3.OperationalError as e:
+            print(f"WARN: value_entries query failed ({e})")
 
-    # ── 4. PO-receipts — qty_received × unit_cost from purchase_orders
-    po_sql = """
-        SELECT vendor_no, SUM(qty_received * unit_cost)
-        FROM purchase_orders
-        WHERE qty_received > 0
-          AND order_date BETWEEN ? AND ?
-        GROUP BY vendor_no
+    # ── 4. ILE-derived spend — sums value_entries via ile_entry_no join
+    # ile_transactions is the operational source the user reconciles against.
+    # cost_amount_actual lives in value_entries; we join on entry numbers and
+    # group by the vendor on the ILE side (source_no there is the buy-from vendor).
+    ile_sql = """
+        SELECT t.source_no AS vendor_no,
+               SUM(COALESCE(ve.cost_amount_actual, 0)) AS spend_ile_via_ve
+        FROM ile_transactions t
+        LEFT JOIN value_entries ve ON ve.ile_entry_no = t.entry_no
+        WHERE t.posting_date BETWEEN ? AND ?
+          AND t.entry_type = 'Purchase'
+          AND t.source_no IS NOT NULL AND t.source_no != ''
+        GROUP BY t.source_no
     """
     try:
-        po_spend = dict(con.execute(po_sql, (start, end)))
-    except sqlite3.OperationalError:
+        po_spend = dict(con.execute(ile_sql, (start, end)))
+    except sqlite3.OperationalError as e:
+        print(f"WARN: ILE+VE query failed ({e})")
         po_spend = {}
 
     # ── Pick vendors to display ─────────────────────────────────────────
@@ -159,7 +189,7 @@ def main():
 
     # ── Print side-by-side ──────────────────────────────────────────────
     h = (f"{'Vendor':<10s} {'OLT rows':>9s} {'unique':>8s} {'×dup':>6s}  "
-         f"{'OLT raw':>12s} {'OLT dedup':>12s} {'Val.Entries':>12s} {'PO recv':>12s}")
+         f"{'OLT raw':>12s} {'OLT dedup':>12s} {'Val.Entries':>12s} {'ILE→VE':>12s}")
     print(h)
     print('-' * len(h))
     for v in targets:
@@ -172,15 +202,16 @@ def main():
     print("  ×dup        = OLT rows / unique (receipt × item).  1.00 = no dup.")
     print("  OLT raw     = current scorecard sum (after the fan-out fix).")
     print("  OLT dedup   = same, but collapsed to one row per (receipt × item).")
-    print("  Val.Entries = SUM(cost_amount_actual) where ile_entry_type='Purchase'.")
-    print("                Financial ledger truth — what posted to vendor's GL.")
-    print("  PO recv     = SUM(qty_received × unit_cost) from purchase_orders.")
+    print("  Val.Entries = SUM(value_entries.cost_amount_actual) where")
+    print(f"                ile_entry_type = {repr(purchase_code)}  (auto-detected).")
+    print("                Financial-ledger truth — what posted to vendor's GL.")
+    print("  ILE→VE      = same dollars reached by joining ile_transactions to")
+    print("                value_entries on entry_no. Should match Val.Entries if")
+    print("                source_no is consistent across the two tables.")
     print()
-    print("If OLT dedup ≈ Val.Entries → switch scorecard to OLT dedup.")
-    print("If OLT dedup still high vs Val.Entries → underlying OLT data has more")
-    print("  duplication than just receipt × item (probably re-archived POs).")
-    print("  In that case the cleanest fix is to use Val.Entries for spend and")
-    print("  keep OLT only for the LT / OTD / fill-rate metrics it's really for.")
+    print("If Val.Entries (or ILE→VE) ≈ your ground truth → that's the right source.")
+    print("Likely fix: switch the scorecard's spend column to value_entries and")
+    print("keep observed_lead_times for LT / OTD / fill-rate metrics only.")
 
     con.close()
 
