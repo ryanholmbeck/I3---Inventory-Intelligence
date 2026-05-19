@@ -3489,7 +3489,16 @@ function _computeVendorRows(startDate, endDate, dropClause, buyerClause) {
         SUM(o.qty_received * o.unit_cost) AS spend
       FROM observed_lead_times o
       LEFT JOIN vendors v ON v.vendor_no = o.vendor_no
-      LEFT JOIN purchase_orders p ON p.po_no = o.po_no AND p.item_no = o.item_no
+      LEFT JOIN (
+        -- Deduplicate purchase_orders to one row per (po_no, item_no).
+        -- Without this collapse, split PO lines fan the OLT row out N times
+        -- and SUM(qty_received * unit_cost) overcounts spend by ~Nx.
+        SELECT po_no, item_no,
+               MAX(COALESCE(drop_shipment, 0)) AS drop_shipment,
+               MAX(COALESCE(purchaser_code, '')) AS purchaser_code
+        FROM purchase_orders
+        GROUP BY po_no, item_no
+      ) p ON p.po_no = o.po_no AND p.item_no = o.item_no
       WHERE o.actual_receipt_date >= ? AND o.actual_receipt_date <= ?
         AND o.vendor_no IS NOT NULL AND o.vendor_no != ''
         AND o.actual_lt_days > 0 AND o.actual_lt_days <= 365
@@ -3972,7 +3981,12 @@ function exportScorecardXLSX() {
                   ELSE 'On Time' END AS status
       FROM observed_lead_times o
       LEFT JOIN vendors v ON v.vendor_no=o.vendor_no
-      LEFT JOIN purchase_orders p ON p.po_no=o.po_no AND p.item_no=o.item_no
+      LEFT JOIN (
+        SELECT po_no, item_no,
+               MAX(COALESCE(drop_shipment, 0)) AS drop_shipment,
+               MAX(COALESCE(purchaser_code, '')) AS purchaser_code
+        FROM purchase_orders GROUP BY po_no, item_no
+      ) p ON p.po_no=o.po_no AND p.item_no=o.item_no
       WHERE o.actual_receipt_date BETWEEN ? AND ?
       ${dropClause}${buyerClause}
       ORDER BY o.vendor_no, o.actual_receipt_date DESC
@@ -4215,6 +4229,9 @@ function exportScorecard() { exportScorecardCSV(); }
 // ── Preserved: per-item drilldown (items + LT history + returns) ───
 function renderDrilldown(vno) {
   // ── PO performance by item ────────────────────────────────────────
+  // Avg LT comes from observed_lead_times (the receipt log knows actual
+  // order→receipt cycle time); pre-aggregated to (item, vendor) so the
+  // outer GROUP BY p.item_no doesn't get fanned out by the join.
   const r = DB.exec(`
     SELECT
       p.item_no,
@@ -4224,10 +4241,17 @@ function renderDrilldown(vno) {
       ROUND(AVG(CASE WHEN p.qty_received>0 AND p.quantity>0
                THEN CAST(p.qty_received AS REAL)/p.quantity END)*100,1) AS fill_pct,
       ROUND(AVG(CASE WHEN p.days_late>0 THEN p.days_late END),1) AS avg_days_late,
+      ROUND(olt.avg_lt_days, 1)               AS avg_lt_days,
       SUM(p.unit_cost*p.qty_received)         AS spend,
       MAX(p.expected_receipt)                 AS last_po_date
     FROM purchase_orders p
     LEFT JOIN items i ON i.item_no=p.item_no
+    LEFT JOIN (
+      SELECT item_no, vendor_no, AVG(actual_lt_days) AS avg_lt_days
+      FROM observed_lead_times
+      WHERE actual_lt_days > 0
+      GROUP BY item_no, vendor_no
+    ) olt ON olt.item_no=p.item_no AND olt.vendor_no=p.vendor_no
     WHERE p.vendor_no=?
     GROUP BY p.item_no
     ORDER BY spend DESC
@@ -4237,9 +4261,10 @@ function renderDrilldown(vno) {
   if (!tbody) return;
   const data = r.length ? r[0].values : [];
 
-  tbody.innerHTML = data.length ? data.map(([ino,desc,pos,otd,fill,adl,spend,last]) => {
-    const otdCls = (otd||0)>=95?'green':(otd||0)>=85?'amber':'red';
-    const fillCls= (fill||0)>=98?'green':(fill||0)>=95?'amber':'red';
+  tbody.innerHTML = data.length ? data.map(([ino,desc,pos,otd,fill,adl,avglt,spend,last]) => {
+    const otdCls  = (otd||0)>=95?'green':(otd||0)>=85?'amber':'red';
+    const fillCls = (fill||0)>=98?'green':(fill||0)>=95?'amber':'red';
+    const ltCls   = avglt==null?'':(avglt>21?'red':avglt>14?'amber':'green');
     return `<tr>
       <td class="mono">${ino}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${(desc||'').slice(0,35)}</td>
@@ -4247,10 +4272,11 @@ function renderDrilldown(vno) {
       <td class="mono ${otdCls}">${(otd||0).toFixed(1)}%</td>
       <td class="mono ${fillCls}">${fill!=null?fill.toFixed(1)+'%':'—'}</td>
       <td class="mono ${(adl||0)>7?'red':(adl||0)>3?'amber':'green'}">${adl!=null?adl+'d':'—'}</td>
+      <td class="mono ${ltCls}">${avglt!=null?avglt.toFixed(1)+'d':'—'}</td>
       <td class="mono">$${fmtN(Math.round(spend||0))}</td>
       <td class="mono">${last||'—'}</td>
     </tr>`;
-  }).join('') : '<tr><td colspan="8" class="empty-state">No PO lines for this vendor</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty-state">No PO lines for this vendor</td></tr>';
 
   // ── Observed LT trend ─────────────────────────────────────────────
   try {
