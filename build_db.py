@@ -101,7 +101,16 @@ VE_ALIASES = {
     'posting date':'posting_date',
     'entry no.':'entry_no','entry no_':'entry_no',
     'item no.':'item_no','item no':'item_no',
+    # SSMS aliases [Item Ledger Entry No_] AS [ILE Entry No.] → CSV header
+    # normalises to 'ile entry no.', NOT 'item ledger entry no.'.
+    # Keep both spellings so either pull path is accepted.
+    'ile entry no.':'ile_entry_no','ile entry no':'ile_entry_no',
     'item ledger entry no.':'ile_entry_no',
+    # SSMS aliases [Item Ledger Entry Type] AS [Entry Type] in pull_value_entries.
+    # Bug history: without the 'entry type' key, every row imported with an
+    # empty ile_entry_type, breaking every scorecard query that filtered
+    # purchases by ile_entry_type.
+    'entry type':'ile_entry_type',
     'item ledger entry type':'ile_entry_type',
     'document no.':'document_no','document type':'document_type',
     'description':'description','location code':'location_code',
@@ -113,6 +122,8 @@ VE_ALIASES = {
     'sales amount (expected)':'sales_amount_expected',
     'purchase amount (actual)':'purchase_amount_actual',
     'cost per unit':'cost_per_unit',
+    # SSMS pull aliases [Cost Posted to G_L] AS [Cost Posted to GL] → 'cost posted to gl'
+    'cost posted to gl':'cost_posted_to_gl',
     'cost posted to g_l':'cost_posted_to_gl',
     'drop shipment':'drop_shipment','expected cost':'expected_cost',
     'item charge no.':'item_charge_no',
