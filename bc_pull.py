@@ -303,17 +303,19 @@ def pull_qoh_from_sku(s):
 
 
 def pull_customers(s):
-    """CustomerCard → Customers CSV matching pull_customers()."""
+    """CustomerCard → Customers CSV. Column headers match exactly what
+    import_customers() in build_db.py expects (no alias normalizer for
+    this importer — names must be exact)."""
     print("  Customers...")
     mapping = {
-        'No.':              'No',
-        'Name':             'Name',
-        'City':             'City',
-        'County':           'County',
-        'Country/Region Code': 'Country_Region_Code',
-        'Payment Terms Code':  'Payment_Terms_Code',
-        'Salesperson Code':    'Salesperson_Code',
-        'Customer Posting Group': 'Customer_Posting_Group',
+        'Customer No.':       'No',
+        'Name':               'Name',
+        'City':               'City',
+        'State':              'County',                  # BC's County field is the state-equivalent
+        'Country':            'Country_Region_Code',
+        'Payment Terms Code': 'Payment_Terms_Code',
+        'Credit Limit':       'Credit_Limit_LCY',        # CustomerCard's local-currency credit limit
+        'Blocked':             'Blocked',
     }
     rows = (map_row(r, mapping) for r in fetch_all(s, 'CustomerCard'))
     return write_csv(rows, list(mapping),
