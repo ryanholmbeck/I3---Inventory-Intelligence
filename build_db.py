@@ -385,6 +385,20 @@ def latest_csv(pattern):
     files = sorted(glob.glob(pattern), reverse=True)
     return files[0] if files else None
 
+def find_csv(pattern, dirs):
+    """Find newest CSV matching pattern, searching dirs in order.
+
+    Returns (path, source_dir_name) or (None, None). The order of `dirs`
+    sets the priority — first directory with a matching file wins.
+    This is how hybrid SSMS+BC mode works: BC_Exports first, fall back
+    to SSMS_Exports for tables BC hasn't published yet.
+    """
+    for d in dirs:
+        f = latest_csv(str(Path(d) / pattern))
+        if f:
+            return f, Path(d).name
+    return None, None
+
 # ── Importers ─────────────────────────────────────────────────────────
 def import_items(conn, filepath, company_source='INDELCO'):
     print(f'  Items: {Path(filepath).name}', end='', flush=True)
@@ -771,7 +785,7 @@ def import_observed_lt(conn, filepath):
     return inserted
 
 
-def build_historical(exports_dir):
+def build_historical(exports_dir, fallback_dir=None):
     """Build indelco_historical.db from AYER, CORR, QS files — run once."""
     print(f'\n{"="*55}')
     print('  Building historical database (AYER + CORR + QS)')
@@ -785,6 +799,8 @@ def build_historical(exports_dir):
     conn = sqlite3.connect(DB_HIST)
     build_schema(conn)
 
+    search_dirs = [exports_dir] + ([Path(fallback_dir)] if fallback_dir else [])
+
     for company in ['AYER', 'CORR', 'QS']:
         print(f'\n  ── {company} ──')
         for pattern, fn in [
@@ -792,7 +808,7 @@ def build_historical(exports_dir):
             (f'ILE_{company}_*.csv',   lambda f: import_ile(conn, f, company)),
             (f'ValueEntry_{company}_*.csv', lambda f: import_value_entries(conn, f, company)),
         ]:
-            f = latest_csv(str(exports_dir / pattern))
+            f, _ = find_csv(pattern, search_dirs)
             if f: fn(f)
             else: print(f'  (no {pattern} found — skipping)')
 
@@ -811,7 +827,7 @@ def build_historical(exports_dir):
     conn.close()
     print(f'\n  Historical DB built in {time.time()-t0:.1f}s → {DB_HIST.name}')
 
-def build_live(exports_dir):
+def build_live(exports_dir, fallback_dir=None):
     """Build indelco_live.db from INDELCO files — run daily."""
     print(f'\n{"="*55}')
     print('  Building live database (Indelco Plastics)')
@@ -823,6 +839,11 @@ def build_live(exports_dir):
 
     conn = sqlite3.connect(DB_LIVE)
     build_schema(conn)
+
+    # Search order: primary --exports first, --fallback after. Lets BC_Exports
+    # supply what it has and SSMS_Exports fill in tables BC hasn't published.
+    search_dirs = [exports_dir] + ([Path(fallback_dir)] if fallback_dir else [])
+    show_src = fallback_dir is not None  # only annotate when there's more than one source
 
     print('\n  ── Indelco Plastics ──')
     for pattern, fn in [
@@ -839,12 +860,13 @@ def build_live(exports_dir):
         ('ObservedLT_INDELCO_*.csv', lambda f: import_observed_lt(conn, f)),
         ('SalesLines_INDELCO_*.csv', lambda f: import_sales_lines(conn, f, 'Indelco Plastics')),
     ]:
-        f = latest_csv(str(exports_dir / pattern))
+        f, src = find_csv(pattern, search_dirs)
         if f:
             label = pattern.split('_')[0]
             result = fn(f)
             if result is not None:
-                print(f'  {label}: {Path(f).name} → {result:,} rows')
+                tag = f' [{src}]' if show_src else ''
+                print(f'  {label}: {Path(f).name}{tag} → {result:,} rows')
         else: print(f'  (no {pattern} — skipping)')
 
     # Ensure all location codes from ILE are in locations table
@@ -978,24 +1000,32 @@ def main():
     parser = argparse.ArgumentParser(description='Indelco DB Builder')
     parser.add_argument('--mode', choices=['historical','live','full','merge'],
                         default='live')
-    parser.add_argument('--exports', default=str(EXPORTS_DIR))
+    parser.add_argument('--exports', default=str(EXPORTS_DIR),
+                        help='Primary CSV directory (default: SSMS_Exports)')
+    parser.add_argument('--fallback', default=None,
+                        help='Secondary CSV directory used per-table when '
+                             '--exports has no matching CSV. Typical hybrid mode: '
+                             '--exports BC_Exports --fallback SSMS_Exports')
     args = parser.parse_args()
 
     exports = Path(args.exports)
     if not exports.exists():
-        print(f'ERROR: SSMS_Exports folder not found at {exports}')
+        print(f'ERROR: --exports folder not found at {exports}')
         print('Run the data pull first.')
+        sys.exit(1)
+    if args.fallback and not Path(args.fallback).exists():
+        print(f'ERROR: --fallback folder not found at {args.fallback}')
         sys.exit(1)
 
     if args.mode == 'historical':
-        build_historical(exports)
+        build_historical(exports, args.fallback)
         merge_databases()
     elif args.mode == 'live':
-        build_live(exports)
+        build_live(exports, args.fallback)
         merge_databases()
     elif args.mode == 'full':
-        build_historical(exports)
-        build_live(exports)
+        build_historical(exports, args.fallback)
+        build_live(exports, args.fallback)
         merge_databases()
     elif args.mode == 'merge':
         merge_databases()
