@@ -28,10 +28,16 @@ Usage:
 import sqlite3
 import sys
 import argparse
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 
 DB_PATH = Path(__file__).parent / 'indelco.db'
+
+
+def step(msg):
+    """Print a progress marker, flushed immediately so we can see where it hangs."""
+    print(f"  · {msg}", flush=True)
 
 
 def get_period_range(period):
@@ -80,6 +86,7 @@ def main():
     # ── Probe: what does ile_entry_type look like in value_entries? ─────
     # SSMS may export the BC enum as the integer (0=Purchase, 1=Sale, etc.)
     # or as the text label depending on the driver. We have to discover it.
+    step("probing value_entries.ile_entry_type distribution")
     probe = list(con.execute("""
         SELECT ile_entry_type, COUNT(*) AS n
         FROM value_entries
@@ -99,8 +106,30 @@ def main():
           else "WARN: couldn't auto-detect a 'Purchase' value in ile_entry_type")
     print()
 
+    # If specific vendors were requested, scope the heavy spend queries to
+    # just those — turns 3.7M-row scans into per-vendor index seeks. Without
+    # this, the value_entries / ILE→VE queries can take minutes on large DBs.
+    vendor_in = ''
+    vendor_params = []
+    if args.vendors:
+        upper = [v.upper() for v in args.vendors]
+        placeholders = ','.join('?' for _ in upper)
+        vendor_in = f' AND source_no IN ({placeholders})'
+        vendor_params = upper
+
+    # OLT-side vendor scope uses vendor_no (not source_no like the VE queries).
+    olt_vendor_in = ''
+    olt_vendor_params = []
+    if args.vendors:
+        upper = [v.upper() for v in args.vendors]
+        ph = ','.join('?' for _ in upper)
+        olt_vendor_in = f' AND vendor_no IN ({ph})'
+        olt_vendor_params = upper
+
     # ── OLT duplication factor per vendor ───────────────────────────────
-    dup_sql = """
+    step("computing OLT duplication factor")
+    t0 = time.time()
+    dup_sql = f"""
         SELECT vendor_no,
                COUNT(*) AS total_rows,
                COUNT(DISTINCT receipt_no || '|' || item_no) AS unique_lines,
@@ -110,25 +139,33 @@ def main():
         WHERE actual_receipt_date BETWEEN ? AND ?
           AND vendor_no IS NOT NULL AND vendor_no != ''
           AND actual_lt_days > 0
+          {olt_vendor_in}
         GROUP BY vendor_no
     """
     dup_map = {}
-    for vendor, n, u, df in con.execute(dup_sql, (start, end)):
+    for vendor, n, u, df in con.execute(dup_sql, [start, end] + olt_vendor_params):
         dup_map[vendor] = (n, u, df or 1.0)
+    step(f"  done in {time.time()-t0:.1f}s")
 
     # ── 1. OLT raw (current scorecard logic)
-    raw_sql = """
+    step("OLT raw spend")
+    t0 = time.time()
+    raw_sql = f"""
         SELECT vendor_no, SUM(qty_received * unit_cost)
         FROM observed_lead_times
         WHERE actual_receipt_date BETWEEN ? AND ?
           AND vendor_no IS NOT NULL AND vendor_no != ''
           AND actual_lt_days > 0
+          {olt_vendor_in}
         GROUP BY vendor_no
     """
-    olt_raw = dict(con.execute(raw_sql, (start, end)))
+    olt_raw = dict(con.execute(raw_sql, [start, end] + olt_vendor_params))
+    step(f"  done in {time.time()-t0:.1f}s")
 
     # ── 2. OLT deduplicated (one row per receipt × item × vendor)
-    dedup_sql = """
+    step("OLT deduplicated spend")
+    t0 = time.time()
+    dedup_sql = f"""
         WITH unique_lines AS (
           SELECT receipt_no, item_no, vendor_no,
                  MAX(qty_received) AS qty_received,
@@ -137,35 +174,50 @@ def main():
           WHERE actual_receipt_date BETWEEN ? AND ?
             AND vendor_no IS NOT NULL AND vendor_no != ''
             AND actual_lt_days > 0
+            {olt_vendor_in}
           GROUP BY receipt_no, item_no, vendor_no
         )
         SELECT vendor_no, SUM(qty_received * unit_cost)
         FROM unique_lines
         GROUP BY vendor_no
     """
-    olt_dedup = dict(con.execute(dedup_sql, (start, end)))
+    olt_dedup = dict(con.execute(dedup_sql, [start, end] + olt_vendor_params))
+    step(f"  done in {time.time()-t0:.1f}s")
 
     # ── 3. Value entries — financial-ledger truth ─────────────────────
+    step("Val.Entries spend (cost_amount_actual filtered by ile_entry_type)")
+    t0 = time.time()
     ve_spend = {}
     if purchase_code is not None:
-        ve_sql = """
+        ve_sql = f"""
             SELECT source_no, SUM(cost_amount_actual)
             FROM value_entries
             WHERE posting_date BETWEEN ? AND ?
               AND ile_entry_type = ?
               AND source_no IS NOT NULL AND source_no != ''
+              {vendor_in}
             GROUP BY source_no
         """
         try:
-            ve_spend = dict(con.execute(ve_sql, (start, end, purchase_code)))
+            ve_spend = dict(con.execute(ve_sql, [start, end, purchase_code] + vendor_params))
         except sqlite3.OperationalError as e:
             print(f"WARN: value_entries query failed ({e})")
+    step(f"  done in {time.time()-t0:.1f}s")
 
     # ── 4. ILE-derived spend — sums value_entries via ile_entry_no join
-    # ile_transactions is the operational source the user reconciles against.
-    # cost_amount_actual lives in value_entries; we join on entry numbers and
-    # group by the vendor on the ILE side (source_no there is the buy-from vendor).
-    ile_sql = """
+    # Scoped to requested vendors first via ile_transactions, then joined
+    # to value_entries on entry_no. Without the vendor scope this is a
+    # 1.6M × 3.7M nested join that takes minutes on an unindexed DB.
+    step("ILE→VE spend (ile_transactions.entry_no → value_entries.ile_entry_no)")
+    t0 = time.time()
+    ile_vendor_in = ''
+    ile_vendor_params = []
+    if args.vendors:
+        upper = [v.upper() for v in args.vendors]
+        ph = ','.join('?' for _ in upper)
+        ile_vendor_in = f' AND t.source_no IN ({ph})'
+        ile_vendor_params = upper
+    ile_sql = f"""
         SELECT t.source_no AS vendor_no,
                SUM(COALESCE(ve.cost_amount_actual, 0)) AS spend_ile_via_ve
         FROM ile_transactions t
@@ -173,13 +225,15 @@ def main():
         WHERE t.posting_date BETWEEN ? AND ?
           AND t.entry_type = 'Purchase'
           AND t.source_no IS NOT NULL AND t.source_no != ''
+          {ile_vendor_in}
         GROUP BY t.source_no
     """
     try:
-        po_spend = dict(con.execute(ile_sql, (start, end)))
+        po_spend = dict(con.execute(ile_sql, [start, end] + ile_vendor_params))
     except sqlite3.OperationalError as e:
         print(f"WARN: ILE+VE query failed ({e})")
         po_spend = {}
+    step(f"  done in {time.time()-t0:.1f}s")
 
     # ── Pick vendors to display ─────────────────────────────────────────
     if args.vendors:
