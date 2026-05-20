@@ -909,6 +909,16 @@ select option{background:var(--bg3)}
         </select>
         <span class="param-default">default: yes</span>
       </div>
+      <div class="param-row">
+        <label class="param-label" title="Item categories forced to a fixed lead time regardless of observed/BC values. Comma-separated, e.g. SIG1,SIG2">LT Override — categories</label>
+        <input type="text" class="param-input" id="p-lt_override_categories" style="width:160px" onchange="saveParam('lt_override_categories',this.value)" value="SIG1,SIG2">
+        <span class="param-default">default: SIG1,SIG2</span>
+      </div>
+      <div class="param-row">
+        <label class="param-label" title="Lead-time days applied to the override categories above">LT Override — days</label>
+        <input type="number" class="param-input" id="p-lt_override_days" min="1" max="365" step="1" onchange="saveParam('lt_override_days',this.value)" value="90">
+        <span class="param-default">default: 90</span>
+      </div>
     </div>
   </div>
 
@@ -1857,6 +1867,8 @@ function seedParams() {
     ['sl_target_b','0.97','%','Service level target for B items'],
     ['sl_target_c','0.95','%','Service level target for C items'],
     ['use_observed_lead_time','yes','yes|no','Use observed LT from receipts instead of BC card'],
+    ['lt_override_categories','SIG1,SIG2','CSV','Item category codes forced to a fixed lead time'],
+    ['lt_override_days','90','Days','Lead time applied to the override categories'],
     ['observed_lt_window_months','12','Months','Rolling window for observed LT calculation'],
     ['demand_forecasting_enabled','no','yes|no','Enable seasonal demand forecasting'],
     ['demand_forecast_horizon','90','Days','Forward projection window in days'],
@@ -4705,13 +4717,17 @@ async function renderObsLT() {
       tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No observed lead time data for this filter</td></tr>';
       return;
     }
+    // Same override list/days the calc engine uses (Parameters page).
+    const _ovCats = new Set((getParam('lt_override_categories','SIG1,SIG2')||'')
+      .toUpperCase().split(',').map(s=>s.trim()).filter(Boolean));
+    const _ovDays = parseInt(getParam('lt_override_days',90)) || 90;
     tbody.innerHTML = data.map(([ino,desc,vno,loc,rcpts,avg,mn,mx,otd,var2,icc])=>{
-      // Effective LT mirrors the calc engine: SIG1/SIG2 forced to 90,
-      // else observed average, else 10-day default when there's no value.
-      const isSig = (icc==='SIG1' || icc==='SIG2');
-      const effLt = isSig ? 90 : (avg!=null && avg>0 ? Math.round(avg) : 10);
-      const effCls = isSig ? 'amber' : (effLt>21?'red':effLt>14?'amber':'green');
-      const effTitle = isSig ? `SIG override (90d) — observed ${avg!=null?avg+'d':'n/a'}`
+      // Effective LT mirrors the calc engine: override categories forced to
+      // the configured days, else observed average, else 10-day default.
+      const isOv = _ovCats.has((icc||'').toUpperCase());
+      const effLt = isOv ? _ovDays : (avg!=null && avg>0 ? Math.round(avg) : 10);
+      const effCls = isOv ? 'amber' : (effLt>21?'red':effLt>14?'amber':'green');
+      const effTitle = isOv ? `category override (${_ovDays}d) — observed ${avg!=null?avg+'d':'n/a'}`
                        : (avg!=null && avg>0 ? '' : 'default 10d (no observed data)');
       const safeDesc = (desc||'').replace(/['"\\]/g,' ').slice(0,40);
       return `<tr style="cursor:pointer" onclick="drillObsLT('${ino}','${vno}','${safeDesc}')">
@@ -4721,7 +4737,7 @@ async function renderObsLT() {
       <td class="mono">${loc}</td>
       <td class="mono">${fmtN(rcpts)}</td>
       <td class="mono ${avg>21?'red':avg>14?'amber':'green'}">${avg!=null?avg+'d':'—'}</td>
-      <td class="mono ${effCls}" title="${effTitle}">${effLt}d${isSig?'*':''}</td>
+      <td class="mono ${effCls}" title="${effTitle}">${effLt}d${isOv?'*':''}</td>
       <td class="mono">${mn!=null?mn+'d':'—'}</td>
       <td class="mono">${mx!=null?mx+'d':'—'}</td>
       <td class="mono ${otd==null?'':(otd>=95?'green':otd>=85?'amber':'red')}">${otd!=null?otd.toFixed(1)+'%':'—'}</td>
@@ -5181,6 +5197,12 @@ async function computeCalculator() {
   const today = new Date().toISOString().slice(0,10);
   const ssMethod = getParam('ss_method','days');
   const useObservedLT = getParam('use_observed_lead_time','yes') !== 'no';
+  // Configurable lead-time override: any item whose category is in this list
+  // is forced to ltOverrideDays regardless of observed/BC values. Editable on
+  // the Parameters page (was hard-coded SIG1/SIG2 = 90).
+  const ltOverrideCats = new Set((getParam('lt_override_categories','SIG1,SIG2')||'')
+    .toUpperCase().split(',').map(s=>s.trim()).filter(Boolean));
+  const ltOverrideDays = parseInt(getParam('lt_override_days',90)) || 90;
   const slA = getParam('sl_target_a', 0.99);
   const slB = getParam('sl_target_b', 0.97);
   const slC = getParam('sl_target_c', 0.95);
@@ -5309,14 +5331,14 @@ async function computeCalculator() {
       //   1. default 10 days
       //   2. BC item-card lead time (lead_time_calc) if present
       //   3. location-specific observed LT if enabled and available
-      //   4. HARD OVERRIDE: SIG1/SIG2 categories always 90 days, regardless
+      //   4. HARD OVERRIDE: configured categories forced to ltOverrideDays
       let lt = 10;
       if (lt_raw) {
         const n = parseInt(lt_raw.replace(/\D/g,''));
         if (!isNaN(n) && n > 0) lt = n;
       }
       if (useObservedLT && obsLT.has(item_no)) lt = obsLT.get(item_no);
-      if (icc === 'SIG1' || icc === 'SIG2') lt = 90;
+      if (ltOverrideCats.has(icc)) lt = ltOverrideDays;
 
       const OF   = abc==='A' ? P.ofa : abc==='B' ? P.ofb : P.ofc;
       const SS_d = abc==='A' ? P.ssa : abc==='B' ? P.ssb : P.ssc;
