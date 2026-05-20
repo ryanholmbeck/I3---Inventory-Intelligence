@@ -4612,20 +4612,25 @@ function closeSikeDrill() {
   if (p) p.style.display = 'none';
 }
 
-function renderObsLT() {
+async function renderObsLT() {
   if (!DB) return;
   try {
     const chk = DB.exec('SELECT COUNT(*) FROM observed_lead_times WHERE actual_lt_days>0');
     if (!chk.length || !chk[0].values[0][0]) {
       const b=document.getElementById('obsltBody');
-      if(b) b.innerHTML='<tr><td colspan="9" class="empty-state">No observed lead time data — run ⚡ Recalculate first</td></tr>';
+      if(b) b.innerHTML='<tr><td colspan="11" class="empty-state">No observed lead time data — run ⚡ Recalculate first</td></tr>';
       return;
     }
   } catch(e) {
     const b=document.getElementById('obsltBody');
-    if(b) b.innerHTML='<tr><td colspan="9" class="empty-state">observed_lead_times table not found — rebuild DB</td></tr>';
+    if(b) b.innerHTML='<tr><td colspan="11" class="empty-state">observed_lead_times table not found — rebuild DB</td></tr>';
     return;
   }
+  // The grouping query over 346K rows freezes the UI ~1.4s in sql.js. Show a
+  // message and yield a frame so the tab never looks blank during the run.
+  const _b = document.getElementById('obsltBody');
+  if (_b) _b.innerHTML = '<tr><td colspan="11" class="empty-state">Computing lead times…</td></tr>';
+  await tick();
   const search = (document.getElementById('obsltSearch')?.value||'').toLowerCase();
   const locF   = document.getElementById('obsltLoc')?.value||'';
   const minR   = parseInt(document.getElementById('obsltMin')?.value||'3');
@@ -6017,7 +6022,7 @@ function switchPOTab(tab, el) {
   if (tab==='late') renderLate();
   if (tab==='unconf') renderUnconf();
   if (tab==='rni') renderRNI();
-  if (tab==='obslt') { renderObsLT(); setTimeout(renderObsLT, 200); }
+  if (tab==='obslt') renderObsLT();
 }
 
 function renderLate() {
