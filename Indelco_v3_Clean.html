@@ -1373,9 +1373,49 @@ function setDataSource(key) {
 async function loadFromLocalServer() {
   const res = await fetch('/indelco.db', {cache: 'no-cache'});
   if (!res.ok) throw new Error(`server.py returned ${res.status}`);
-  const buf = await res.arrayBuffer();
+
+  // Stream the body so we can show download progress. A plain
+  // res.arrayBuffer() gives no feedback, and on a large DB the load looks
+  // frozen. Content-Length lets us show a percentage; if it's missing we
+  // still show MB downloaded.
+  const total = parseInt(res.headers.get('Content-Length') || '0', 10);
+  let buf;
+  if (res.body && res.body.getReader) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
+    let lastPaint = 0;
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      // Repaint roughly every 25 MB so the UI thread isn't spammed.
+      if (received - lastPaint > 25 * 1024 * 1024) {
+        lastPaint = received;
+        const mb = (received / 1048576).toFixed(0);
+        const pct = total ? ` (${Math.round(received / total * 100)}%)` : '';
+        updateDBStatus(`Downloading database… ${mb} MB${pct}`, false);
+        await tick();
+      }
+    }
+    buf = new Uint8Array(received);
+    let pos = 0;
+    for (const c of chunks) { buf.set(c, pos); pos += c.length; }
+  } else {
+    buf = new Uint8Array(await res.arrayBuffer());
+  }
+
   if (!buf || buf.byteLength < 1024) throw new Error('indelco.db is empty or missing');
-  DB = new SQL.Database(new Uint8Array(buf));
+
+  // The SQL.Database() constructor parses synchronously and blocks the UI
+  // thread, so flip the status message and yield one frame before it runs —
+  // otherwise the user never sees that the parse phase started.
+  const mb = (buf.byteLength / 1048576).toFixed(0);
+  updateDBStatus(`Loading ${mb} MB into memory… (this can take 10-30s)`, false);
+  await tick();
+  DB = new SQL.Database(buf);
+
   // db_meta is best-effort: older DBs may not have it. Don't fail the load.
   let ts = 'unknown';
   try {
