@@ -149,6 +149,12 @@ tr:last-child td{border-bottom:none}
 .filter-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .filter-bar input,.filter-bar select{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:var(--r);font-size:12px;font-family:var(--font)}
 .filter-bar input{width:200px}.filter-bar input::placeholder{color:var(--text3)}
+/* form-select had no dark styling, so the scorecard Period / Drop-Ships
+   dropdowns rendered with browser-default colors — dark text on the dark
+   page, effectively invisible. Give them (and their option lists) the same
+   treatment as the other inputs. */
+select.form-select,select.form-select-sm{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:var(--r);font-size:12px;font-family:var(--font);cursor:pointer}
+select.form-select option,select.form-select-sm option{background:var(--bg2);color:var(--text)}
 .upload-zone{border:2px dashed var(--border2);border-radius:var(--r2);padding:24px;text-align:center;cursor:pointer;transition:all .2s}
 .upload-zone:hover,.upload-zone.drag-over{border-color:var(--accent);background:rgba(77,124,254,.08)}
 .upload-zone input{display:none}
@@ -270,8 +276,8 @@ select option{background:var(--bg3)}
   <div class="kpi-card"><div class="kpi-label">ILE Rows Loaded</div><div class="kpi-value" id="kpi-ile">—</div><div class="kpi-sub">transactions in DB</div></div>
 </div>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
-  <div class="card"><div class="card-header"><div class="card-title">ABC Distribution</div></div><canvas id="abcChart" height="180"></canvas></div>
-  <div class="card"><div class="card-header"><div class="card-title">Stocking Recommendations</div></div><canvas id="recChart" height="180"></canvas></div>
+  <div class="card"><div class="card-header"><div class="card-title">ABC Distribution</div></div><div style="position:relative;height:200px"><canvas id="abcChart"></canvas></div></div>
+  <div class="card"><div class="card-header"><div class="card-title">Stocking Recommendations</div></div><div style="position:relative;height:200px"><canvas id="recChart"></canvas></div></div>
 </div>
 <div class="card">
   <div class="card-header"><div class="card-title">Top Overstock Items</div><button class="btn btn-ghost btn-sm" onclick="showPage('exceptions')">View all →</button></div>
@@ -4651,6 +4657,12 @@ async function renderObsLT() {
   // bug that never matched). Now filters the real location_code column.
   const lf     = locF ? `AND o.location_code = '${locF.replace(/'/g,"''")}'` : '';
   const sf     = search ? `AND (LOWER(o.item_no) LIKE '%${search}%' OR LOWER(COALESCE(i.description,'')) LIKE '%${search}%' OR LOWER(o.vendor_no) LIKE '%${search}%')` : '';
+  // Lead time uses the SAME rolling window as the ADU calc (ile_lookback_days)
+  // so observed LT and demand stay comparable and dynamic. Without this, the
+  // average pulls in years of receipts and gets dragged up by old data.
+  const _lookbackDays = parseInt(getParam('ile_lookback_days', 182)) || 182;
+  const _oltCutoff = new Date(Date.now() - _lookbackDays*86400000).toISOString().slice(0,10);
+  const wf = `AND o.actual_receipt_date >= '${_oltCutoff}'`;
   const tbody = document.getElementById('obsltBody');
   try {
     const r = DB.exec(`SELECT
@@ -4666,7 +4678,7 @@ async function renderObsLT() {
       UPPER(COALESCE(i.item_category_code,'')) AS icc
       FROM observed_lead_times o
       LEFT JOIN items i ON i.item_no=o.item_no
-      WHERE o.actual_lt_days>0 ${lf} ${sf}
+      WHERE o.actual_lt_days>0 ${wf} ${lf} ${sf}
       GROUP BY o.item_no, o.vendor_no, o.location_code
       HAVING COUNT(*)>=?
       ORDER BY ${orderBy} LIMIT ${LIMIT}`, [minR]);
@@ -4681,7 +4693,7 @@ async function renderObsLT() {
       let total = data.length;
       try {
         const c = DB.exec(`SELECT COUNT(*) FROM (SELECT 1 FROM observed_lead_times o
-          WHERE o.actual_lt_days>0 ${lf} ${sf}
+          WHERE o.actual_lt_days>0 ${wf} ${lf} ${sf}
           GROUP BY o.item_no, o.vendor_no, o.location_code HAVING COUNT(*)>=?)`, [minR]);
         if (c.length && c[0].values.length) total = c[0].values[0][0];
       } catch(_) {}
@@ -5181,16 +5193,19 @@ async function computeCalculator() {
   const obsLT = new Map();
   if (useObservedLT) {
     try {
-      // Observed LT is now location-specific: only receipts at the location
-      // being calculated count toward its lead time. Items with no receipts
-      // at this location fall through to the BC card / 10-day default below
-      // (or the SIG1/SIG2 = 90 hard override).
+      // Observed LT is location-specific AND uses the same rolling window as
+      // the ADU calc (ile_lookback_days), so demand and lead time stay
+      // comparable. Items with no receipts at this location in-window fall
+      // through to the BC card / 10-day default (or SIG1/SIG2 = 90 override).
+      const _olDays = parseInt(getParam('ile_lookback_days', 182)) || 182;
+      const _olCutoff = new Date(Date.now() - _olDays*86400000).toISOString().slice(0,10);
       const r = DB.exec(
         `SELECT item_no, ROUND(AVG(actual_lt_days),0)
          FROM observed_lead_times
          WHERE actual_lt_days > 0 AND actual_lt_days <= 365
            AND location_code = ?
-         GROUP BY item_no`, [currentLocation]);
+           AND actual_receipt_date >= ?
+         GROUP BY item_no`, [currentLocation, _olCutoff]);
       if (r.length) for (const [it, lt] of r[0].values) if (lt) obsLT.set(it, Math.round(lt));
     } catch(e) {}
   }
@@ -5431,7 +5446,7 @@ function renderPieChart(id, labels, data, colors) {
   charts[id] = new Chart(el.getContext('2d'), {
     type:'doughnut',
     data:{labels, datasets:[{data, backgroundColor:colors.map(c=>c+'cc'), borderColor:colors, borderWidth:2}]},
-    options:{responsive:true,plugins:{legend:{labels:{color:'#9aa3b8',font:{size:11},boxWidth:12}},tooltip:{backgroundColor:'#1e2333',borderColor:'#2d3448',borderWidth:1}},cutout:'60%'}
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#9aa3b8',font:{size:11},boxWidth:12}},tooltip:{backgroundColor:'#1e2333',borderColor:'#2d3448',borderWidth:1}},cutout:'60%'}
   });
 }
 
