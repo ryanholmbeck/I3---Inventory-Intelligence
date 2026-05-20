@@ -493,12 +493,15 @@ select option{background:var(--bg3)}
   <div class="table-wrap" style="max-height:380px;overflow-y:auto">
     <table id="tbl-obslt"><thead><tr>
       <th title="Item Number">Item No.</th><th title="Description">Description</th>
-      <th title="Vendor Number">Vendor</th><th title="Receipt count">Receipts</th>
-      <th title="Average actual lead time">Avg LT</th><th title="Minimum LT">Min LT</th>
+      <th title="Vendor Number">Vendor</th><th title="Receiving location">Loc</th>
+      <th title="Receipt count">Receipts</th>
+      <th title="Average actual lead time observed at this location">Avg LT</th>
+      <th title="Effective lead time used in calculations (SIG1/SIG2 forced to 90d; 10d default when no data)">Eff LT</th>
+      <th title="Minimum LT">Min LT</th>
       <th title="Maximum LT">Max LT</th>
       <th title="On-time delivery rate">OTD %</th><th title="Average variance from promised date">Avg Variance</th>
     </tr></thead>
-    <tbody id="obsltBody"><tr><td colspan="9" class="empty-state">Loading...</td></tr></tbody>
+    <tbody id="obsltBody"><tr><td colspan="11" class="empty-state">Loading...</td></tr></tbody>
     </table>
   </div>
   <div id="obslt-drill" style="display:none;margin-top:12px">
@@ -4611,40 +4614,62 @@ function renderObsLT() {
   const search = (document.getElementById('obsltSearch')?.value||'').toLowerCase();
   const locF   = document.getElementById('obsltLoc')?.value||'';
   const minR   = parseInt(document.getElementById('obsltMin')?.value||'3');
-  const lf     = locF ? `AND o.actual_receipt_date LIKE '${locF}%'` : '';
+  // Fixed: was filtering actual_receipt_date LIKE 'loc%' (a date-vs-location
+  // bug that never matched). Now filters the real location_code column.
+  const lf     = locF ? `AND o.location_code = '${locF.replace(/'/g,"''")}'` : '';
   const sf     = search ? `AND (LOWER(o.item_no) LIKE '%${search}%' OR LOWER(COALESCE(i.description,'')) LIKE '%${search}%' OR LOWER(o.vendor_no) LIKE '%${search}%')` : '';
+  const tbody = document.getElementById('obsltBody');
   try {
     const r = DB.exec(`SELECT
       o.item_no, COALESCE(i.description,'') AS desc, o.vendor_no,
+      COALESCE(NULLIF(o.location_code,''),'—') AS loc,
       COUNT(*) AS receipts,
       ROUND(AVG(o.actual_lt_days),1) AS avg_lt,
       MIN(o.actual_lt_days) AS min_lt,
       MAX(o.actual_lt_days) AS max_lt,
       ROUND(SUM(CASE WHEN o.on_time=1 THEN 1.0 ELSE 0 END)*100.0
         /NULLIF(SUM(CASE WHEN o.on_time IS NOT NULL THEN 1 ELSE 0 END),0),1) AS otd_pct,
-      ROUND(AVG(CASE WHEN o.days_variance IS NOT NULL THEN o.days_variance END),1) AS avg_var
+      ROUND(AVG(CASE WHEN o.days_variance IS NOT NULL THEN o.days_variance END),1) AS avg_var,
+      UPPER(COALESCE(i.item_category_code,'')) AS icc
       FROM observed_lead_times o
       LEFT JOIN items i ON i.item_no=o.item_no
       WHERE o.actual_lt_days>0 ${lf} ${sf}
-      GROUP BY o.item_no, o.vendor_no
+      GROUP BY o.item_no, o.vendor_no, o.location_code
       HAVING COUNT(*)>=?
       ORDER BY avg_lt DESC LIMIT 500`, [minR]);
     const data = r.length ? r[0].values : [];
-    const tbody = document.getElementById('obsltBody');
     if (!tbody) return;
     populateObsLTLocations();
-    tbody.innerHTML = data.length ? data.map(([ino,desc,vno,rcpts,avg,mn,mx,otd,var2])=>`<tr style="cursor:pointer" onclick="drillObsLT('${ino}','${vno}','${(desc||'').replace(/'/g,"\'")}')" >
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No observed lead time data for this filter</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map(([ino,desc,vno,loc,rcpts,avg,mn,mx,otd,var2,icc])=>{
+      // Effective LT mirrors the calc engine: SIG1/SIG2 forced to 90,
+      // else observed average, else 10-day default when there's no value.
+      const isSig = (icc==='SIG1' || icc==='SIG2');
+      const effLt = isSig ? 90 : (avg!=null && avg>0 ? Math.round(avg) : 10);
+      const effCls = isSig ? 'amber' : (effLt>21?'red':effLt>14?'amber':'green');
+      const effTitle = isSig ? `SIG override (90d) — observed ${avg!=null?avg+'d':'n/a'}`
+                       : (avg!=null && avg>0 ? '' : 'default 10d (no observed data)');
+      const safeDesc = (desc||'').replace(/['"\\]/g,' ').slice(0,40);
+      return `<tr style="cursor:pointer" onclick="drillObsLT('${ino}','${vno}','${safeDesc}')">
       <td class="mono">${ino}</td>
-      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis">${(desc||'').slice(0,28)}</td>
+      <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${(desc||'').slice(0,26)}</td>
       <td class="mono">${vno||'—'}</td>
+      <td class="mono">${loc}</td>
       <td class="mono">${fmtN(rcpts)}</td>
       <td class="mono ${avg>21?'red':avg>14?'amber':'green'}">${avg!=null?avg+'d':'—'}</td>
+      <td class="mono ${effCls}" title="${effTitle}">${effLt}d${isSig?'*':''}</td>
       <td class="mono">${mn!=null?mn+'d':'—'}</td>
       <td class="mono">${mx!=null?mx+'d':'—'}</td>
       <td class="mono ${otd==null?'':(otd>=95?'green':otd>=85?'amber':'red')}">${otd!=null?otd.toFixed(1)+'%':'—'}</td>
       <td class="mono ${var2==null?'':var2<=0?'green':var2<=3?'amber':'red'}">${var2!=null?(var2>0?'+':'')+var2+'d':'—'}</td>
-    </tr>`).join('') : '<tr><td colspan="9" class="empty-state">No observed lead time data — pull leadtimes from SSMS</td></tr>';
-  } catch(e) { console.error('renderObsLT:',e); }
+    </tr>`;}).join('');
+  } catch(e) {
+    console.error('renderObsLT:',e);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="empty-state">Error: ${e.message} — if it mentions 'location_code', rebuild the DB (build_db.py)</td></tr>`;
+  }
 }
 
 function populateObsLTLocations() {
@@ -5107,11 +5132,16 @@ async function computeCalculator() {
   const obsLT = new Map();
   if (useObservedLT) {
     try {
+      // Observed LT is now location-specific: only receipts at the location
+      // being calculated count toward its lead time. Items with no receipts
+      // at this location fall through to the BC card / 10-day default below
+      // (or the SIG1/SIG2 = 90 hard override).
       const r = DB.exec(
         `SELECT item_no, ROUND(AVG(actual_lt_days),0)
          FROM observed_lead_times
          WHERE actual_lt_days > 0 AND actual_lt_days <= 365
-         GROUP BY item_no`);
+           AND location_code = ?
+         GROUP BY item_no`, [currentLocation]);
       if (r.length) for (const [it, lt] of r[0].values) if (lt) obsLT.set(it, Math.round(lt));
     } catch(e) {}
   }
@@ -5151,7 +5181,8 @@ async function computeCalculator() {
             COALESCE(e.excluded,0), COALESCE(e.reason,''),
             COALESCE(sup.nncr_flag,0), COALESCE(sup.customer_contract_flag,0),
             COALESCE(sup.drop_ship_only,0), COALESCE(sup.physical_space_available,1),
-            COALESCE(sup.customer_count,0), COALESCE(sup.stocking_override,'')
+            COALESCE(sup.customer_count,0), COALESCE(sup.stocking_override,''),
+            COALESCE(i.item_category_code,'')
      FROM item_calculator c
      LEFT JOIN ile_summary s
        ON c.item_no=s.item_no AND s.location_code=c.location_code
@@ -5206,15 +5237,22 @@ async function computeCalculator() {
       const space    = row[19];
       const custCnt  = row[20]||0;
       const stockOv  = row[21]||'';
+      const icc      = (row[22]||'').toUpperCase().trim();
       const date_last= row[5]||null;
       const std_dev  = row[4]||0;
 
+      // Lead-time precedence:
+      //   1. default 10 days
+      //   2. BC item-card lead time (lead_time_calc) if present
+      //   3. location-specific observed LT if enabled and available
+      //   4. HARD OVERRIDE: SIG1/SIG2 categories always 90 days, regardless
       let lt = 10;
       if (lt_raw) {
         const n = parseInt(lt_raw.replace(/\D/g,''));
         if (!isNaN(n) && n > 0) lt = n;
       }
       if (useObservedLT && obsLT.has(item_no)) lt = obsLT.get(item_no);
+      if (icc === 'SIG1' || icc === 'SIG2') lt = 90;
 
       const OF   = abc==='A' ? P.ofa : abc==='B' ? P.ofb : P.ofc;
       const SS_d = abc==='A' ? P.ssa : abc==='B' ? P.ssb : P.ssc;

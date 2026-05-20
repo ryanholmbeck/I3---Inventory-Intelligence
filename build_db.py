@@ -328,6 +328,7 @@ def build_schema(conn):
     CREATE TABLE IF NOT EXISTS observed_lead_times (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         item_no TEXT, vendor_no TEXT, receipt_no TEXT, po_no TEXT,
+        location_code TEXT,
         order_date TEXT, promised_receipt_date TEXT, actual_receipt_date TEXT,
         actual_lt_days INTEGER, promised_lt_days INTEGER,
         days_variance INTEGER, on_time INTEGER,
@@ -335,6 +336,7 @@ def build_schema(conn):
 
     CREATE INDEX IF NOT EXISTS idx_olt_item ON observed_lead_times(item_no);
     CREATE INDEX IF NOT EXISTS idx_olt_vendor ON observed_lead_times(vendor_no);
+    CREATE INDEX IF NOT EXISTS idx_olt_item_loc ON observed_lead_times(item_no, location_code);
 
     CREATE TABLE IF NOT EXISTS xyz_classification (
         item_no TEXT, location_code TEXT, xyz_class TEXT, cov REAL,
@@ -786,12 +788,15 @@ def import_observed_lt(conn, filepath):
             if not actual_lt or actual_lt <= 0: continue
             conn.execute("""
                 INSERT OR IGNORE INTO observed_lead_times
-                  (item_no, vendor_no, receipt_no, po_no,
+                  (item_no, vendor_no, receipt_no, po_no, location_code,
                    order_date, promised_receipt_date, actual_receipt_date,
                    actual_lt_days, promised_lt_days, days_variance,
                    on_time, qty_received, unit_cost)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (item, vendor, row.get('Receipt No.',''), row.get('PO No.',''),
+                 # Location Code only present if the SSMS pull was updated to
+                 # emit it. Absent → '' here, then backfilled from ILE below.
+                 str(row.get('Location Code','')).strip(),
                  row.get('Order Date',''), row.get('Promised Receipt Date',''),
                  row.get('Actual Receipt Date',''),
                  int(actual_lt), pf(row.get('Promised Lead Time Days',0)),
@@ -799,7 +804,38 @@ def import_observed_lt(conn, filepath):
                  pf(row.get('Qty Received',0)), pf(row.get('Unit Cost',0))))
             inserted += 1
     conn.commit()
+    _backfill_olt_location(conn)
     return inserted
+
+
+def _backfill_olt_location(conn):
+    """Fill observed_lead_times.location_code from ILE where the SSMS pull
+    didn't provide it. A posted purchase receipt creates ILE 'Purchase'
+    entries whose document_no equals the receipt number, so we can recover
+    the receiving location by matching (receipt_no, item_no)."""
+    try:
+        conn.execute("""
+            UPDATE observed_lead_times
+            SET location_code = (
+                SELECT t.location_code
+                FROM ile_transactions t
+                WHERE t.document_no = observed_lead_times.receipt_no
+                  AND t.item_no     = observed_lead_times.item_no
+                  AND t.entry_type  = 'Purchase'
+                  AND t.location_code IS NOT NULL AND t.location_code != ''
+                LIMIT 1
+            )
+            WHERE (location_code IS NULL OR location_code = '')
+        """)
+        conn.commit()
+        n = conn.execute(
+            "SELECT COUNT(*) FROM observed_lead_times "
+            "WHERE location_code IS NOT NULL AND location_code != ''"
+        ).fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM observed_lead_times").fetchone()[0]
+        print(f'    OLT location backfill: {n:,}/{total:,} rows now have a location')
+    except Exception as e:
+        print(f'    OLT location backfill skipped: {e}')
 
 
 def build_historical(exports_dir, fallback_dir=None):
