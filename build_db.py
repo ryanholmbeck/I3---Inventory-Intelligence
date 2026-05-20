@@ -1026,7 +1026,16 @@ def merge_databases():
                     cols = [c for c,pk in all_cols if not (c=='id' and pk==1)]
                     col_str = ','.join(cols)
                     placeholders = ','.join(['?'] * len(cols))
-                    rows = hist_conn.execute(f'SELECT {col_str} FROM {table}').fetchall()
+                    # The historical DB's value_entries were built before the
+                    # VE_ALIASES fix, so ile_entry_type is empty for all of
+                    # them — no spend query can use those rows (every one
+                    # filters ile_entry_type IN ('0','Purchase')). Skip them
+                    # so they don't bloat the browser-loaded DB by ~2.1M dead
+                    # rows. Rebuild --mode historical to recover them properly.
+                    where = ''
+                    if table == 'value_entries':
+                        where = " WHERE ile_entry_type IS NOT NULL AND ile_entry_type != ''"
+                    rows = hist_conn.execute(f'SELECT {col_str} FROM {table}{where}').fetchall()
                     conn.execute('BEGIN')
                     added = 0
                     for row in rows:
