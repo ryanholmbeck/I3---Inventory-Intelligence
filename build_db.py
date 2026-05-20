@@ -195,6 +195,7 @@ def build_schema(conn):
     CREATE INDEX IF NOT EXISTS idx_ile_loc  ON ile_transactions(location_code);
     CREATE INDEX IF NOT EXISTS idx_ile_date ON ile_transactions(posting_date);
     CREATE INDEX IF NOT EXISTS idx_ile_type ON ile_transactions(entry_type);
+    CREATE INDEX IF NOT EXISTS idx_ile_doc_item ON ile_transactions(document_no, item_no);
 
     CREATE TABLE IF NOT EXISTS value_entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -814,6 +815,14 @@ def _backfill_olt_location(conn):
     entries whose document_no equals the receipt number, so we can recover
     the receiving location by matching (receipt_no, item_no)."""
     try:
+        # The correlated subquery below seeks into ile_transactions by
+        # (document_no, item_no) once per OLT row. Without this index that's
+        # 346k partial scans of a 1.6M-row table — effectively a hang. With
+        # it, each lookup is an index seek and the whole backfill is seconds.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ile_doc_item "
+            "ON ile_transactions(document_no, item_no)")
+        conn.commit()
         conn.execute("""
             UPDATE observed_lead_times
             SET location_code = (
