@@ -488,6 +488,14 @@ select option{background:var(--bg3)}
         <option value="5">5+</option><option value="10">10+</option>
       </select>
     </label>
+    <label style="font-size:11px;color:var(--text2)">Sort:
+      <select id="obsltSort" onchange="renderObsLT()" class="form-select form-select-sm">
+        <option value="lt_desc" selected>Avg LT — slowest first</option>
+        <option value="lt_asc">Avg LT — fastest first</option>
+        <option value="receipts">Most receipts</option>
+      </select>
+    </label>
+    <span id="obsltCount" style="font-size:11px;color:var(--text3)"></span>
     <button class="btn btn-ghost btn-sm" onclick="exportObsLTCSV()">📤 Export</button>
   </div>
   <div class="table-wrap" style="max-height:380px;overflow-y:auto">
@@ -4634,6 +4642,11 @@ async function renderObsLT() {
   const search = (document.getElementById('obsltSearch')?.value||'').toLowerCase();
   const locF   = document.getElementById('obsltLoc')?.value||'';
   const minR   = parseInt(document.getElementById('obsltMin')?.value||'3');
+  const sortV  = document.getElementById('obsltSort')?.value || 'lt_desc';
+  const orderBy = sortV==='lt_asc' ? 'avg_lt ASC'
+                : sortV==='receipts' ? 'receipts DESC'
+                : 'avg_lt DESC';
+  const LIMIT = 500;
   // Fixed: was filtering actual_receipt_date LIKE 'loc%' (a date-vs-location
   // bug that never matched). Now filters the real location_code column.
   const lf     = locF ? `AND o.location_code = '${locF.replace(/'/g,"''")}'` : '';
@@ -4656,10 +4669,26 @@ async function renderObsLT() {
       WHERE o.actual_lt_days>0 ${lf} ${sf}
       GROUP BY o.item_no, o.vendor_no, o.location_code
       HAVING COUNT(*)>=?
-      ORDER BY avg_lt DESC LIMIT 500`, [minR]);
+      ORDER BY ${orderBy} LIMIT ${LIMIT}`, [minR]);
     const data = r.length ? r[0].values : [];
     if (!tbody) return;
     populateObsLTLocations();
+    // Total matching combos (before LIMIT) so the truncation is explicit —
+    // otherwise the sorted-slowest-first view makes the floor of the top 500
+    // look like the real minimum.
+    const cntEl = document.getElementById('obsltCount');
+    if (cntEl) {
+      let total = data.length;
+      try {
+        const c = DB.exec(`SELECT COUNT(*) FROM (SELECT 1 FROM observed_lead_times o
+          WHERE o.actual_lt_days>0 ${lf} ${sf}
+          GROUP BY o.item_no, o.vendor_no, o.location_code HAVING COUNT(*)>=?)`, [minR]);
+        if (c.length && c[0].values.length) total = c[0].values[0][0];
+      } catch(_) {}
+      cntEl.textContent = total > data.length
+        ? `showing ${data.length} of ${total.toLocaleString()} (refine filters to see more)`
+        : `${total.toLocaleString()} combos`;
+    }
     if (!data.length) {
       tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No observed lead time data for this filter</td></tr>';
       return;
