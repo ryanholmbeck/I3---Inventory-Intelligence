@@ -195,7 +195,6 @@ def build_schema(conn):
     CREATE INDEX IF NOT EXISTS idx_ile_loc  ON ile_transactions(location_code);
     CREATE INDEX IF NOT EXISTS idx_ile_date ON ile_transactions(posting_date);
     CREATE INDEX IF NOT EXISTS idx_ile_type ON ile_transactions(entry_type);
-    CREATE INDEX IF NOT EXISTS idx_ile_doc_item ON ile_transactions(document_no, item_no);
 
     CREATE TABLE IF NOT EXISTS value_entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,12 +213,12 @@ def build_schema(conn):
 
     CREATE INDEX IF NOT EXISTS idx_ve_item ON value_entries(item_no);
     CREATE INDEX IF NOT EXISTS idx_ve_date ON value_entries(posting_date);
-    -- Joining ile_transactions → value_entries on entry_no is the canonical
-    -- way to compute purchase spend in BC. Without an index here, that join
-    -- is a 1.6M × 3.7M nested scan that takes minutes.
-    CREATE INDEX IF NOT EXISTS idx_ve_ile_entry_no ON value_entries(ile_entry_no);
-    CREATE INDEX IF NOT EXISTS idx_ve_type ON value_entries(ile_entry_type);
-    CREATE INDEX IF NOT EXISTS idx_ve_source ON value_entries(source_no);
+    -- NOTE: deliberately NOT indexing ile_entry_no / ile_entry_type /
+    -- source_no here. They each cost ~70-100 MB on a 5.9M-row table, and
+    -- the browser loads the whole DB into sql.js memory — three extra
+    -- indexes pushed the file past 2 GiB and broke the load. idx_ve_date
+    -- carries the scorecard's date-range spend query well enough. The
+    -- diag_spend.py one-off creates its own temp indexes if it needs them.
 
     DROP TABLE IF EXISTS purchase_orders;
     CREATE TABLE IF NOT EXISTS purchase_orders (
@@ -836,6 +835,11 @@ def _backfill_olt_location(conn):
             )
             WHERE (location_code IS NULL OR location_code = '')
         """)
+        conn.commit()
+        # The doc-item index was only needed to make the backfill fast. Drop
+        # it now — it costs ~100 MB and the browser never queries by it, which
+        # matters because sql.js loads the whole DB into memory.
+        conn.execute("DROP INDEX IF EXISTS idx_ile_doc_item")
         conn.commit()
         n = conn.execute(
             "SELECT COUNT(*) FROM observed_lead_times "
