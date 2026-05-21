@@ -4922,7 +4922,6 @@ async function runCalculationsAllLocations() {
         await calculateABC();         await tick();
         await computeCalculator();    await tick();
         await runXYZClassification(); await tick();
-        await applyExclusionRules(exclMap);
         total++;
       } catch(e) {
         console.error(`Failed for ${loc}:`, e);
@@ -4930,6 +4929,21 @@ async function runCalculationsAllLocations() {
       }
       await tick();
     }
+
+    // Exclusions as a clean FINAL pass, after every location's calc steps are
+    // done. Running applyExclusionRules inside the per-location loop (between
+    // computeCalculator's and runXYZClassification's transactions) left
+    // exclusions not persisting — the function is correct standalone, but the
+    // interleaved transaction state ate the writes. Doing it here, separated
+    // from the calc transactions, matches the conditions that work reliably.
+    for (let i = 0; i < locList.length; i++) {
+      currentLocation = locList[i];
+      if (btn) btn.textContent = `⏳ exclusions ${i+1}/${locList.length}`;
+      await tick();
+      try { await applyExclusionRules(exclMap); }
+      catch(e) { console.error(`Exclusion pass failed for ${locList[i]}:`, e); }
+    }
+
     currentLocation = origLoc;
     refreshDashboard();
     populateBuyerDropdown();
