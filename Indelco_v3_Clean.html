@@ -2723,6 +2723,7 @@ function switchCalcTab(tab, el) {
   document.getElementById('calcTab-active').style.display  = tab==='active'   ? 'block' : 'none';
   document.getElementById('calcTab-excluded').style.display = tab==='excluded' ? 'block' : 'none';
   if (tab === 'excluded') renderExcludedItems();
+  else if (tab === 'active') renderCalcTable(); // re-render so post-recalc exclusions drop off Active
 }
 
 // ── Render excluded items tab ─────────────────────────────────────────
@@ -4948,6 +4949,8 @@ async function runCalculationsAllLocations() {
     refreshDashboard();
     populateBuyerDropdown();
     renderParams();
+    try { renderCalcTable(); } catch(e) {}  // refresh Active list post-recalc
+    try { updateExclBadge(); } catch(e) {}  // refresh the Excluded count badge
     const secs = ((performance.now()-t0)/1000).toFixed(1);
     toast(`✓ Calculations complete for ${total} locations in ${secs}s`,'success');
   } catch(e) {
