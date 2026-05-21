@@ -133,6 +133,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
 .kpi-value{font-size:24px;font-weight:600;font-family:var(--mono)}
 .kpi-value.green{color:var(--green)}.kpi-value.amber{color:var(--amber)}.kpi-value.red{color:var(--red)}
 .kpi-sub{font-size:11px;color:var(--text3);margin-top:3px}
+.kpi-section-label{font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--text2);margin:16px 0 6px 2px}
+.kpi-card.clickable{cursor:pointer;transition:border-color .15s}
+.kpi-card.clickable:hover{border-color:var(--accent)}
+.kpi-goal{font-size:11px;color:var(--text3);margin-top:4px;min-height:14px}
+.kpi-goal.green{color:var(--green)}.kpi-goal.red{color:var(--red)}.kpi-goal.amber{color:var(--amber)}
 .table-wrap{overflow-x:auto;border-radius:var(--r);border:1px solid var(--border)}
 table{width:100%;border-collapse:collapse;font-size:12px}
 thead tr{background:var(--bg3)}
@@ -265,16 +270,54 @@ select option{background:var(--bg3)}
 
 <div class="section-title">Dashboard</div>
 <div class="section-sub" id="dashSub">Select a location and import data to begin</div>
-<div class="kpi-grid">
-  <div class="kpi-card"><div class="kpi-label">Total Items</div><div class="kpi-value" id="kpi-total">—</div><div class="kpi-sub">in item master</div></div>
-  <div class="kpi-card"><div class="kpi-label">Calculated SKUs</div><div class="kpi-value" id="kpi-skus">—</div><div class="kpi-sub">with ROP set</div></div>
-  <div class="kpi-card"><div class="kpi-label">ABC: A Items</div><div class="kpi-value green" id="kpi-a">—</div><div class="kpi-sub">top 80% spend</div></div>
-  <div class="kpi-card"><div class="kpi-label">Aging Flags</div><div class="kpi-value amber" id="kpi-aging">—</div><div class="kpi-sub">&gt;180 days no movement</div></div>
-  <div class="kpi-card"><div class="kpi-label">Overstock Flags</div><div class="kpi-value amber" id="kpi-over">—</div><div class="kpi-sub">&gt;2× projected usage</div></div>
-  <div class="kpi-card"><div class="kpi-label">No-Stock Rec.</div><div class="kpi-value red" id="kpi-nostock">—</div><div class="kpi-sub">items to remove</div></div>
-  <div class="kpi-card"><div class="kpi-label">Review Queue</div><div class="kpi-value amber" id="kpi-review">—</div><div class="kpi-sub">needs decision</div></div>
-  <div class="kpi-card"><div class="kpi-label">ILE Rows Loaded</div><div class="kpi-value" id="kpi-ile">—</div><div class="kpi-sub">transactions in DB</div></div>
+
+<div class="filter-bar" style="margin-bottom:14px">
+  <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:6px;cursor:pointer">
+    <input type="checkbox" id="dashCompanyWide" onchange="refreshDashboard()">
+    Company-wide (all locations)
+  </label>
+  <span style="font-size:11px;color:var(--text3)" id="dashScopeLabel"></span>
 </div>
+
+<!-- ── Stocking Plan ─────────────────────────────────────── -->
+<div class="kpi-section-label">STOCKING PLAN</div>
+<div class="kpi-grid">
+  <div class="kpi-card clickable" onclick="showPage('scenario')" title="Expected average inventory value under the current plan: Σ safety-stock value + ½ reorder-point value">
+    <div class="kpi-label">Expected Inventory Value</div><div class="kpi-value" id="ek-invval">—</div><div class="kpi-goal" id="ek-invval-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('calculator')" title="Items flagged REVIEW — need a stocking decision">
+    <div class="kpi-label">Items to Review</div><div class="kpi-value amber" id="ek-review">—</div><div class="kpi-goal" id="ek-review-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('stocking')" title="Active items at or below reorder point">
+    <div class="kpi-label">Reorder Needed</div><div class="kpi-value" id="ek-reorder">—</div><div class="kpi-goal" id="ek-reorder-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('stocking')" title="Items recommended to stock that are currently at zero on-hand">
+    <div class="kpi-label">Zero-Stock (should stock)</div><div class="kpi-value red" id="ek-zero">—</div><div class="kpi-goal" id="ek-zero-goal"></div></div>
+</div>
+
+<!-- ── Purchasing ───────────────────────────────────────── -->
+<div class="kpi-section-label">PURCHASING</div>
+<div class="kpi-grid">
+  <div class="kpi-card clickable" onclick="showPage('purchasing')" title="Open purchase orders"><div class="kpi-label">Open POs</div><div class="kpi-value" id="ek-po">—</div><div class="kpi-goal" id="ek-po-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('purchasing')" title="PO lines past expected receipt"><div class="kpi-label">Late Lines</div><div class="kpi-value red" id="ek-late">—</div><div class="kpi-goal" id="ek-late-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('purchasing')" title="POs with no vendor confirmation"><div class="kpi-label">Unconfirmed</div><div class="kpi-value amber" id="ek-unconf">—</div><div class="kpi-goal" id="ek-unconf-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('purchasing')" title="Received-not-invoiced accrual value"><div class="kpi-label">RNI Value</div><div class="kpi-value" id="ek-rni">—</div><div class="kpi-goal" id="ek-rni-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('scorecard')" title="Vendor on-time delivery rate"><div class="kpi-label">Vendor OTD</div><div class="kpi-value green" id="ek-otd">—</div><div class="kpi-goal" id="ek-otd-goal"></div></div>
+</div>
+
+<!-- ── Inventory Health ─────────────────────────────────── -->
+<div class="kpi-section-label">INVENTORY HEALTH</div>
+<div class="kpi-grid">
+  <div class="kpi-card clickable" onclick="showPage('scenario')" title="Annual usage value ÷ average inventory value"><div class="kpi-label">Inventory Turns</div><div class="kpi-value" id="ek-turns">—</div><div class="kpi-goal" id="ek-turns-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('stocking')" title="Current on-hand value at cost"><div class="kpi-label">Total On-Hand Value</div><div class="kpi-value" id="ek-onhand">—</div><div class="kpi-goal" id="ek-onhand-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('exceptions')" title="Overstock value (items flagged over target)"><div class="kpi-label">Overstock Value</div><div class="kpi-value amber" id="ek-overstock">—</div><div class="kpi-goal" id="ek-overstock-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('exceptions')" title="Overstock item count"><div class="kpi-label">Overstock Items</div><div class="kpi-value" id="ek-overcnt">—</div><div class="kpi-goal" id="ek-overcnt-goal"></div></div>
+</div>
+
+<!-- ── Returns ──────────────────────────────────────────── -->
+<div class="kpi-section-label">RETURN CANDIDATES</div>
+<div class="kpi-grid">
+  <div class="kpi-card clickable" onclick="showPage('exceptions')" title="Recoverable capital: on-hand value of dead/overstock items (qty>0 and aging or overstock)"><div class="kpi-label">Return Candidate Value</div><div class="kpi-value" id="ek-retval">—</div><div class="kpi-goal" id="ek-retval-goal"></div></div>
+  <div class="kpi-card clickable" onclick="showPage('exceptions')" title="Count of return-candidate items"><div class="kpi-label">Return Candidate Items</div><div class="kpi-value" id="ek-retcnt">—</div><div class="kpi-goal" id="ek-retcnt-goal"></div></div>
+</div>
+
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
   <div class="card"><div class="card-header"><div class="card-title">ABC Distribution</div></div><div style="position:relative;height:200px"><canvas id="abcChart"></canvas></div></div>
   <div class="card"><div class="card-header"><div class="card-title">Stocking Recommendations</div></div><div style="position:relative;height:200px"><canvas id="recChart"></canvas></div></div>
@@ -1032,6 +1075,21 @@ select option{background:var(--bg3)}
         <input type="number" class="param-input" id="p-lt_default_c" min="1" max="365" step="1" onchange="saveParam('lt_default_c',this.value)" value="15">
         <span class="param-default">default: 15</span>
       </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div class="card-title">🎯 KPI Targets</div></div>
+    <div class="section-sub" style="margin:0 0 10px">Goals shown on the Dashboard with red/green status. Saved locally so they persist across reloads. Leave blank for no target.</div>
+    <div class="param-grid">
+      <div class="param-row"><label class="param-label">Expected Inventory Value ($)</label><input type="number" class="param-input" id="goal-invval" onchange="setGoal('kpi_goal_invval',this.value)" placeholder="target $"></div>
+      <div class="param-row"><label class="param-label">Inventory Turns (×)</label><input type="number" step="0.1" class="param-input" id="goal-turns" onchange="setGoal('kpi_goal_turns',this.value)" placeholder="e.g. 6"></div>
+      <div class="param-row"><label class="param-label">Vendor OTD (%)</label><input type="number" step="0.1" class="param-input" id="goal-otd" onchange="setGoal('kpi_goal_otd',this.value)" placeholder="e.g. 95"></div>
+      <div class="param-row"><label class="param-label">Total On-Hand Value ($)</label><input type="number" class="param-input" id="goal-onhand" onchange="setGoal('kpi_goal_onhand',this.value)" placeholder="target $"></div>
+      <div class="param-row"><label class="param-label">Overstock Value ($)</label><input type="number" class="param-input" id="goal-overstock" onchange="setGoal('kpi_goal_overstock',this.value)" placeholder="max $"></div>
+      <div class="param-row"><label class="param-label">Return Candidate Value ($)</label><input type="number" class="param-input" id="goal-retval" onchange="setGoal('kpi_goal_retval',this.value)" placeholder="max $"></div>
+      <div class="param-row"><label class="param-label">Items to Review</label><input type="number" class="param-input" id="goal-review" onchange="setGoal('kpi_goal_review',this.value)" placeholder="max count"></div>
+      <div class="param-row"><label class="param-label">Reorder Needed</label><input type="number" class="param-input" id="goal-reorder" onchange="setGoal('kpi_goal_reorder',this.value)" placeholder="max count"></div>
     </div>
   </div>
 
@@ -1940,6 +1998,7 @@ function showPage(id) {
   if (id === 'parameters') {
     fn[id]?.();
     setTimeout(renderParams, 100);
+    setTimeout(populateGoalInputs, 120);
   } else {
     fn[id]?.();
   }
@@ -5434,20 +5493,119 @@ async function computeCalculator() {
 }
 
 
+// ── KPI goal targets (localStorage-backed so they survive reloads) ────
+const KPI_GOALS_KEY = 'indelco_kpi_goals_v1';
+function getGoal(key) {
+  try { const g = JSON.parse(localStorage.getItem(KPI_GOALS_KEY) || '{}'); return g[key] ?? ''; }
+  catch (e) { return ''; }
+}
+function setGoal(key, val) {
+  try {
+    const g = JSON.parse(localStorage.getItem(KPI_GOALS_KEY) || '{}');
+    if (val === '' || val == null) delete g[key]; else g[key] = val;
+    localStorage.setItem(KPI_GOALS_KEY, JSON.stringify(g));
+    if (typeof refreshDashboard === 'function') refreshDashboard();
+  } catch (e) { console.warn('setGoal:', e); }
+}
+function populateGoalInputs() {
+  document.querySelectorAll('[id^="goal-"]').forEach(el => {
+    el.value = getGoal('kpi_goal_' + el.id.replace('goal-', '')) || '';
+  });
+}
+
+// ── Executive KPI grid ────────────────────────────────
+// Sets a KPI value + optional goal/RAG. If a goal is set, the card shows
+// "target X" colored green (on track) / amber (within 10%) / red.
+// betterLower=true means lower actuals are better (cost, late lines, etc.).
+function setExecKPI(elId, raw, fmt, goalKey, betterLower) {
+  const el = document.getElementById(elId);
+  if (el) el.textContent = (raw == null) ? '—' : fmt(raw);
+  const gEl = document.getElementById(elId + '-goal');
+  if (!gEl) return;
+  const goal = parseFloat(getGoal(goalKey));
+  if (!goal || isNaN(goal) || raw == null) { gEl.textContent = ''; gEl.className = 'kpi-goal'; return; }
+  const onTrack = betterLower ? (raw <= goal) : (raw >= goal);
+  const near    = betterLower ? (raw <= goal * 1.1) : (raw >= goal * 0.9);
+  gEl.className = 'kpi-goal ' + (onTrack ? 'green' : near ? 'amber' : 'red');
+  gEl.textContent = `${onTrack ? '✓' : (betterLower ? '▲' : '▼')} target ${fmt(goal)}`;
+}
+
+function computeExecKPIs() {
+  if (!DB || !currentLocation) return;
+  const companyWide = document.getElementById('dashCompanyWide')?.checked;
+  const loc = currentLocation.replace(/'/g, "''");
+  // item_calculator alias is `c`; plain location_code for tables without alias.
+  const icScope = companyWide ? '' : ` AND c.location_code='${loc}'`;
+  const buyer = (typeof globalBuyer !== 'undefined' && globalBuyer) ? globalBuyer : '';
+
+  const scopeLabel = document.getElementById('dashScopeLabel');
+  if (scopeLabel) scopeLabel.textContent = (companyWide ? 'All locations' : 'Location ' + currentLocation) + (buyer ? ` · Buyer ${buyer}` : '');
+  const dashSub = document.getElementById('dashSub');
+  if (dashSub) dashSub.textContent = (companyWide ? 'Company-wide' : 'Location ' + currentLocation) + ` · ${new Date().toLocaleString()}`;
+
+  const wd = parseFloat(getParam('working_days_year', 252)) || 252;
+  const dollarFmt = v => '$' + fmtN(Math.round(v || 0));
+  const pctFmt = v => (v || 0).toFixed(1) + '%';
+  const one = (sql, p = []) => { try { const r = DB.exec(sql, p); return r.length && r[0].values.length ? (r[0].values[0][0] || 0) : 0; } catch (e) { console.warn('execKPI:', e.message); return 0; } };
+
+  // ── Stocking Plan ──
+  const invVal = one(`SELECT COALESCE(SUM(c.safety_stock*COALESCE(i.unit_cost,0)),0)
+       + COALESCE(SUM(c.bin1_trigger*COALESCE(i.unit_cost,0)),0)/2.0
+     FROM item_calculator c LEFT JOIN items i ON i.item_no=c.item_no
+     WHERE (c.excluded=0 OR c.excluded IS NULL)${icScope}`);
+  setExecKPI('ek-invval', invVal, dollarFmt, 'kpi_goal_invval', true);
+  setExecKPI('ek-review', one(`SELECT COUNT(*) FROM item_calculator c WHERE c.stocking_recommendation='REVIEW'${icScope}`), fmtN, 'kpi_goal_review', true);
+  setExecKPI('ek-reorder', one(`SELECT COUNT(*) FROM item_calculator c
+     LEFT JOIN item_qoh q ON q.item_no=c.item_no AND q.location_code=c.location_code
+     WHERE (c.excluded=0 OR c.excluded IS NULL) AND c.reorder_point>0
+       AND COALESCE(q.qty_on_hand,0)<=c.reorder_point${icScope}`), fmtN, 'kpi_goal_reorder', true);
+  setExecKPI('ek-zero', one(`SELECT COUNT(*) FROM item_calculator c
+     LEFT JOIN item_qoh q ON q.item_no=c.item_no AND q.location_code=c.location_code
+     WHERE c.stocking_recommendation='STOCK' AND COALESCE(q.qty_on_hand,0)<=0${icScope}`), fmtN, 'kpi_goal_zero', true);
+
+  // ── Purchasing (purchase_orders has no `c` alias; buyer + location scoped) ──
+  const poScope = companyWide ? '' : ` AND location_code='${loc}'`;
+  const poBuyer = buyer ? ` AND UPPER(COALESCE(purchaser_code,''))=UPPER('${buyer.replace(/'/g, "''")}')` : '';
+  const poW = `WHERE 1=1${poScope}${poBuyer}`;
+  setExecKPI('ek-po', one(`SELECT COUNT(DISTINCT po_no) FROM purchase_orders ${poW}`), fmtN, 'kpi_goal_po', false);
+  setExecKPI('ek-late', one(`SELECT COUNT(*) FROM purchase_orders ${poW} AND is_late=1`), fmtN, 'kpi_goal_late', true);
+  setExecKPI('ek-unconf', one(`SELECT COUNT(*) FROM purchase_orders ${poW} AND unconfirmed=1`), fmtN, 'kpi_goal_unconf', true);
+  setExecKPI('ek-rni', one(`SELECT COALESCE(SUM(rni_value),0) FROM purchase_orders ${poW}`), dollarFmt, 'kpi_goal_rni', true);
+  setExecKPI('ek-otd', one(`SELECT ROUND(SUM(on_time)*100.0/MAX(1,COUNT(*)),1) FROM purchase_orders ${poW}`), pctFmt, 'kpi_goal_otd', false);
+
+  // ── Inventory Health ──
+  const onhand = one(`SELECT COALESCE(SUM(COALESCE(q.qty_on_hand,0)*COALESCE(i.unit_cost,0)),0)
+     FROM item_calculator c
+     LEFT JOIN item_qoh q ON q.item_no=c.item_no AND q.location_code=c.location_code
+     LEFT JOIN items i ON i.item_no=c.item_no
+     WHERE (c.excluded=0 OR c.excluded IS NULL)${icScope}`);
+  setExecKPI('ek-onhand', onhand, dollarFmt, 'kpi_goal_onhand', true);
+  const annUsage = one(`SELECT COALESCE(SUM(c.adu*${wd}*COALESCE(i.unit_cost,0)),0)
+     FROM item_calculator c LEFT JOIN items i ON i.item_no=c.item_no
+     WHERE (c.excluded=0 OR c.excluded IS NULL)${icScope}`);
+  setExecKPI('ek-turns', invVal > 0 ? annUsage / invVal : 0, v => v.toFixed(1) + '×', 'kpi_goal_turns', false);
+  setExecKPI('ek-overstock', one(`SELECT COALESCE(SUM(COALESCE(q.qty_on_hand,0)*COALESCE(i.unit_cost,0)),0)
+     FROM item_calculator c
+     LEFT JOIN item_qoh q ON q.item_no=c.item_no AND q.location_code=c.location_code
+     LEFT JOIN items i ON i.item_no=c.item_no
+     WHERE c.overstock_flag=1${icScope}`), dollarFmt, 'kpi_goal_overstock', true);
+  setExecKPI('ek-overcnt', one(`SELECT COUNT(*) FROM item_calculator c WHERE c.overstock_flag=1${icScope}`), fmtN, 'kpi_goal_overcnt', true);
+
+  // ── Return candidates: on-hand>0 AND (aging OR overstock) ──
+  const retWhere = `LEFT JOIN item_qoh q ON q.item_no=c.item_no AND q.location_code=c.location_code
+     WHERE COALESCE(q.qty_on_hand,0)>0 AND (c.aging_flag=1 OR c.overstock_flag=1)${icScope}`;
+  setExecKPI('ek-retval', one(`SELECT COALESCE(SUM(COALESCE(q.qty_on_hand,0)*COALESCE(i.unit_cost,0)),0)
+     FROM item_calculator c LEFT JOIN items i ON i.item_no=c.item_no ${retWhere}`), dollarFmt, 'kpi_goal_retval', true);
+  setExecKPI('ek-retcnt', one(`SELECT COUNT(*) FROM item_calculator c ${retWhere}`), fmtN, 'kpi_goal_retcnt', true);
+}
+
 // ── Dashboard ─────────────────────────────────────────
 function refreshDashboard() {
   if (!currentLocation||!DB) return;
   const loc = currentLocation;
-  const q = (sql,p=[])=>{ const r=DB.exec(sql,p); return r.length&&r[0].values.length?r[0].values[0][0]:0; };
-  document.getElementById('kpi-total').textContent = fmtN(q(`SELECT COUNT(*) FROM items`));
-  document.getElementById('kpi-skus').textContent = fmtN(q(`SELECT COUNT(*) FROM item_calculator WHERE location_code=? AND (excluded=0 OR excluded IS NULL)`,[loc]));
-  document.getElementById('kpi-a').textContent = fmtN(q(`SELECT COUNT(*) FROM item_calculator WHERE location_code=? AND abc_class='A'`,[loc]));
-  document.getElementById('kpi-aging').textContent = fmtN(q(`SELECT COUNT(*) FROM item_calculator WHERE location_code=? AND aging_flag=1`,[loc]));
-  document.getElementById('kpi-over').textContent = fmtN(q(`SELECT COUNT(*) FROM item_calculator WHERE location_code=? AND overstock_flag=1`,[loc]));
-  document.getElementById('kpi-nostock').textContent = fmtN(q(`SELECT COUNT(*) FROM item_calculator WHERE location_code=? AND stocking_recommendation='NO-STOCK'`,[loc]));
-  document.getElementById('kpi-review').textContent = fmtN(q(`SELECT COUNT(*) FROM item_calculator WHERE location_code=? AND stocking_recommendation='REVIEW'`,[loc]));
-  document.getElementById('kpi-ile').textContent = fmtN(q(`SELECT COUNT(*) FROM ile_transactions`));
-  document.getElementById('dashSub').textContent = `Location ${loc} · ${new Date().toLocaleString()}`;
+
+  // Executive KPI grid (scoped, with goals + RAG)
+  try { computeExecKPIs(); } catch(e) { console.error('computeExecKPIs:', e); }
 
   // ABC chart
   const abcR = DB.exec(`SELECT abc_class,COUNT(*) FROM item_calculator WHERE location_code=? GROUP BY abc_class`,[loc]);
