@@ -3252,7 +3252,7 @@ function resetParameters() {
 // ── Spike Log page renderer ───────────────────────────────────────────
 function renderSpikeLog() {
   if (!currentLocation) return;
-  const search = (document.getElementById('spikeSearch')?.value||'').toLowerCase();
+  const search = (document.getElementById('spikeSearch')?.value||'').toLowerCase().replace(/'/g,"''");
 
   try { DB.run(`CREATE TABLE IF NOT EXISTS spike_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4774,7 +4774,7 @@ async function renderObsLT() {
   const _b = document.getElementById('obsltBody');
   if (_b) _b.innerHTML = '<tr><td colspan="11" class="empty-state">Computing lead times…</td></tr>';
   await tick();
-  const search = (document.getElementById('obsltSearch')?.value||'').toLowerCase();
+  const search = (document.getElementById('obsltSearch')?.value||'').toLowerCase().replace(/'/g,"''");
   const locF   = document.getElementById('obsltLoc')?.value||'';
   const minR   = parseInt(document.getElementById('obsltMin')?.value||'3');
   const sortV  = document.getElementById('obsltSort')?.value || 'lt_desc';
@@ -4914,7 +4914,7 @@ function closeObsLTDrill() {
 
 function exportObsLTCSV() {
   if (!DB) return;
-  const search = (document.getElementById('obsltSearch')?.value||'').toLowerCase();
+  const search = (document.getElementById('obsltSearch')?.value||'').toLowerCase().replace(/'/g,"''");
   const minR = parseInt(document.getElementById('obsltMin')?.value||'3');
   const sf = search ? `AND (LOWER(o.item_no) LIKE '%${search}%' OR LOWER(COALESCE(i.description,'')) LIKE '%${search}%')` : '';
   try {
@@ -6069,7 +6069,7 @@ function exportTop30Workbook() {
 
 function renderStockTable() {
   if (!currentLocation) return;
-  const search=(document.getElementById('stockSearch')?.value||'').toLowerCase();
+  const search=(document.getElementById('stockSearch')?.value||'').toLowerCase().replace(/'/g,"''");
   const rec=document.getElementById('stockRec')?.value||'';
   let sql=`SELECT c.item_no,i.description,i.inventory_planning_group,c.adu,s.date_last,
     i.unit_cost,c.stocking_recommendation,c.stocking_flags,sup.stocking_override
@@ -6126,7 +6126,7 @@ function switchExcTab(tab, el) {
 
 function renderAging() {
   if (!currentLocation) return;
-  const search=(document.getElementById('agingSearch')?.value||'').toLowerCase();
+  const search=(document.getElementById('agingSearch')?.value||'').toLowerCase().replace(/'/g,"''");
   const r=DB.exec(`SELECT c.item_no,i.description,c.abc_class,i.qty_on_hand,
     c.date_last_movement,c.days_since_last_movement,i.qty_on_hand*i.unit_cost,
     sup.returnable
@@ -6853,42 +6853,14 @@ const PARAM_GROUPS = {
   ],
 };
 
-function renderParams() {
-  const map={
-    ABC:'paramABC', XYZ:'paramXYZ', Freq:'paramFreq', SS:'paramSS',
-    Ops:'paramOps', Aging:'paramAging', Demand:'paramDemand'
-  };
-  for (const [grp, params] of Object.entries(PARAM_GROUPS)) {
-    const el=document.getElementById(map[grp]); if (!el) continue;
-    el.innerHTML=params.map(p=>{
-      const val=getParam(p.key,'');
-      const isToggle = p.unit && p.unit.includes('|');
-      const options = isToggle ? p.unit.split('|') : null;
-      return `<div class="param-row">
-        <div class="param-name">
-          <div>${p.label}</div>
-          ${p.notes ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">${p.notes}</div>` : ''}
-        </div>
-        ${isToggle
-          ? `<select class="param-input" id="param-${p.key}" style="width:120px">
-              ${options.map(o=>`<option value="${o}" ${val===o?'selected':''}>${o}</option>`).join('')}
-             </select>`
-          : `<input class="param-input" id="param-${p.key}" value="${val}">`
-        }
-        <div class="param-unit" style="color:var(--text3)">${isToggle?'':p.unit}</div>
-      </div>`;
-    }).join('');
-  }
-}
-
-function saveParameters() {
-  for (const params of Object.values(PARAM_GROUPS))
-    for (const p of params) {
-      const el=document.getElementById('param-'+p.key);
-      if (el) DB.run(`INSERT OR REPLACE INTO parameters(key,value) VALUES(?,?)`,[p.key,el.value]);
-    }
-  toast('Parameters saved — click ⚡ Recalculate to apply','success');
-}
+// NOTE: a second renderParams() + saveParameters() used to live here,
+// targeting paramABC/paramXYZ container divs and param-* inputs that do
+// not exist in this build (the Parameters page uses static p-* inputs).
+// Because JS hoisting let the later definition win, the real renderParams
+// (which populates the p-* inputs with saved values) was shadowed and the
+// page silently showed inline defaults instead of saved values. Removed
+// the dead pair so the correct renderParams is live. saveAllParams() is
+// the live save path (wired to the Save button).
 
 // ── DB save/load ──────────────────────────────────────
 function saveDB() {
