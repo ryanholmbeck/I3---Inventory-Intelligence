@@ -5844,8 +5844,9 @@ function renderTopInvValue() {
   const tbody = document.getElementById('topInvValueBody');
   if (!tbody) return;
   try {
-    // TRIM() on both sides guards against BC padding location_code with
-    // trailing whitespace, which silently breaks `= ?` joins.
+    // Skip items excluded by your rules (NONSTOCK, 00PROD, etc.) — keeps the
+    // top 30 focused on items you actually want to manage. COALESCE handles
+    // items with no calculator row (treated as not-excluded).
     const r = DB.exec(`
       SELECT q.item_no, COALESCE(i.description,'') AS desc, COALESCE(c.abc_class,'') AS abc,
              q.qty_on_hand, COALESCE(i.unit_cost,0) AS uc,
@@ -5854,6 +5855,7 @@ function renderTopInvValue() {
       LEFT JOIN items i ON i.item_no=q.item_no
       LEFT JOIN item_calculator c ON c.item_no=q.item_no AND TRIM(c.location_code)=TRIM(q.location_code)
       WHERE TRIM(q.location_code)=TRIM(?) AND q.qty_on_hand>0 AND COALESCE(i.unit_cost,0)>0
+        AND COALESCE(c.excluded,0)=0
       ORDER BY value DESC LIMIT 30`, [currentLocation]);
     const data = r.length ? r[0].values : [];
     _top30InvRows = data;
@@ -5903,12 +5905,18 @@ function renderTop30Movers() {
   // LEFT JOIN that blew up against the full items table.
   let topData = [];
   try {
+    // LEFT JOIN to item_calculator (per-location, ~12K rows — safe size)
+    // so excluded items are filtered out. excluded=1 covers NONSTOCK,
+    // 00PROD, KIT1, etc. — whatever your active exclusion rules match.
     const r = DB.exec(`
       SELECT s.item_no, COUNT(*) AS shipments, SUM(s.quantity) AS qty, SUM(s.amount) AS sales
       FROM sales_lines s
+      LEFT JOIN item_calculator c
+        ON c.item_no=s.item_no AND TRIM(c.location_code)=TRIM(s.location_code)
       WHERE TRIM(s.location_code)=TRIM(?)
         AND COALESCE(s.amount,0) > 0
         AND COALESCE(s.shipment_date,'') >= ?
+        AND COALESCE(c.excluded,0) = 0
       GROUP BY s.item_no
       ORDER BY sales DESC LIMIT 30`, [currentLocation, cutoffStr]);
     topData = (r && r[0] && r[0].values) ? r[0].values : [];
