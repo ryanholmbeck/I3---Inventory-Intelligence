@@ -409,6 +409,29 @@ select option{background:var(--bg3)}
     <th title="ABC Class">ABC</th>
   </tr></thead><tbody id="reorderBody"><tr><td colspan="9" class="empty-state">Run ⚡ Recalculate to populate</td></tr></tbody></table></div>
 </div>
+
+<div class="card" style="margin-top:14px">
+  <div class="card-header">
+    <div class="card-title">💰 Top 30 Inventory Value — current location</div>
+    <button class="btn btn-ghost btn-sm" onclick="exportTopInvValueCSV()">📤 Export CSV</button>
+  </div>
+  <div class="table-wrap"><table id="tbl-top-invval"><thead><tr>
+    <th>#</th><th>Item No.</th><th>Description</th><th>ABC</th>
+    <th>QoH</th><th>Unit Cost</th><th>On-Hand $</th>
+  </tr></thead><tbody id="topInvValueBody"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table></div>
+</div>
+
+<div class="card" style="margin-top:14px">
+  <div class="card-header">
+    <div class="card-title">📈 Top 30 Movers — Sales $ (trailing 6 months, from posted shipments)</div>
+    <button class="btn btn-ghost btn-sm" onclick="exportTopMoversCSV()">📤 Export CSV</button>
+  </div>
+  <div class="table-wrap"><table id="tbl-top-movers"><thead><tr>
+    <th>#</th><th>Item No.</th><th>Description</th>
+    <th>Shipments</th><th>Qty Sold</th><th>Sales $</th>
+  </tr></thead><tbody id="topMoversBody"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table></div>
+</div>
+
     </div>
     <div class="page" id="page-exceptions">
 
@@ -1981,7 +2004,7 @@ function showPage(id) {
   const fn = {
     dashboard: refreshDashboard,
     calculator: renderCalcTable,
-    stocking: renderStockTable,
+    stocking: () => { renderStockTable(); renderTopInvValue(); renderTopMovers(); },
     exceptions: () => renderAging(),
     spikes: renderSpikeLog,
     exclusions: renderExclusionRules,
@@ -5797,6 +5820,92 @@ function switchStockTab(tab, el) {
   if (tab==='active') renderStockTable();
   if (tab==='zero') renderZeroStock();
   if (tab==='reorder') renderReorderNeeded();
+}
+
+// ── Top 30 Inventory Value (current location) ─────────
+function renderTopInvValue() {
+  if (!DB || !currentLocation) return;
+  const tbody = document.getElementById('topInvValueBody');
+  if (!tbody) return;
+  try {
+    const r = DB.exec(`
+      SELECT q.item_no, COALESCE(i.description,'') AS desc, COALESCE(c.abc_class,'') AS abc,
+             q.qty_on_hand, COALESCE(i.unit_cost,0) AS uc,
+             q.qty_on_hand * COALESCE(i.unit_cost,0) AS value
+      FROM item_qoh q
+      LEFT JOIN items i ON i.item_no=q.item_no
+      LEFT JOIN item_calculator c ON c.item_no=q.item_no AND c.location_code=q.location_code
+      WHERE q.location_code=? AND q.qty_on_hand>0 AND COALESCE(i.unit_cost,0)>0
+      ORDER BY value DESC LIMIT 30`, [currentLocation]);
+    const data = r.length ? r[0].values : [];
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No QoH data for this location</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map(([no,desc,abc,qoh,uc,val],i) => `<tr>
+      <td class="mono">${i+1}</td>
+      <td class="mono">${no}</td>
+      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${(desc||'').slice(0,60)}</td>
+      <td>${abc?abcBadge(abc):'—'}</td>
+      <td class="mono">${fmtN(qoh)}</td>
+      <td class="mono">$${fmtN(uc.toFixed(2))}</td>
+      <td class="mono">$${fmtN(Math.round(val))}</td>
+    </tr>`).join('');
+  } catch(e) {
+    console.error('renderTopInvValue:', e);
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Error: ${e.message}</td></tr>`;
+  }
+}
+
+// ── Top 30 Movers — Sales $ ───────────────────────────
+function renderTopMovers() {
+  if (!DB || !currentLocation) return;
+  const tbody = document.getElementById('topMoversBody');
+  if (!tbody) return;
+  try {
+    const r = DB.exec(`
+      SELECT s.item_no, COALESCE(i.description,'') AS desc,
+             COUNT(*) AS shipments, SUM(s.quantity) AS qty, SUM(s.amount) AS sales
+      FROM sales_lines s
+      LEFT JOIN items i ON i.item_no=s.item_no
+      WHERE s.location_code=? AND COALESCE(s.amount,0) > 0
+      GROUP BY s.item_no
+      ORDER BY sales DESC LIMIT 30`, [currentLocation]);
+    const data = r.length ? r[0].values : [];
+    if (!data.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No sales-line data for this location</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map(([no,desc,ships,qty,sales],i) => `<tr>
+      <td class="mono">${i+1}</td>
+      <td class="mono">${no}</td>
+      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${(desc||'').slice(0,60)}</td>
+      <td class="mono">${fmtN(ships)}</td>
+      <td class="mono">${fmtN(Math.round(qty||0))}</td>
+      <td class="mono">$${fmtN(Math.round(sales||0))}</td>
+    </tr>`).join('');
+  } catch(e) {
+    console.error('renderTopMovers:', e);
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
+  }
+}
+
+// CSV export for the top-30 tables — reads what's currently rendered.
+function _tableToCSV(tableId) {
+  const t = document.getElementById(tableId);
+  if (!t) return '';
+  return Array.from(t.querySelectorAll('tr')).map(row =>
+    Array.from(row.querySelectorAll('th,td')).map(cell => {
+      const v = (cell.innerText || '').replace(/"/g, '""');
+      return /[,"\n]/.test(v) ? `"${v}"` : v;
+    }).join(',')
+  ).join('\n');
+}
+function exportTopInvValueCSV() {
+  _download(_tableToCSV('tbl-top-invval'), `top30_inv_value_${currentLocation||'all'}.csv`, 'text/csv');
+}
+function exportTopMoversCSV() {
+  _download(_tableToCSV('tbl-top-movers'), `top30_movers_${currentLocation||'all'}.csv`, 'text/csv');
 }
 
 function renderStockTable() {
