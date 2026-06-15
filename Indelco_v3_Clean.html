@@ -416,7 +416,7 @@ select option{background:var(--bg3)}
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <span style="font-size:12px;color:var(--text2)">Top 30 by value & by sales — current location</span>
       <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px">Movers lookback:
-        <select id="topMoversLookback" class="form-select form-select-sm" onchange="renderTopMovers()" title="Sales-line pull is currently 12 months from BC; older windows only have data after the next Daily Refresh with the updated pull.">
+        <select id="topMoversLookback" class="form-select form-select-sm" onchange="renderTop30Movers()" title="Sales-line pull is currently 12 months from BC; older windows only have data after the next Daily Refresh with the updated pull.">
           <option value="3">3 months</option>
           <option value="6" selected>6 months</option>
           <option value="9">9 months</option>
@@ -5830,7 +5830,7 @@ function switchStockTab(tab, el) {
   if (tab==='active') renderStockTable();
   if (tab==='zero') renderZeroStock();
   if (tab==='reorder') renderReorderNeeded();
-  if (tab==='top30') { renderTopInvValue(); renderTopMovers(); }
+  if (tab==='top30') { renderTopInvValue(); renderTop30Movers(); }
 }
 
 // Cache the last-rendered rows so the XLSX export uses real numbers,
@@ -5877,7 +5877,15 @@ function renderTopInvValue() {
 }
 
 // ── Top 30 Movers — Sales $ ───────────────────────────
-function renderTopMovers() {
+// NOTE: must NOT be named `renderTopMovers` — that name is taken by a
+// different function below that renders the Trends/Historical page,
+// and JS hoisting means the later definition silently overrides the
+// earlier one. Both functions then look indistinguishable in devtools
+// (`renderTopMovers.toString()` shows the OTHER one), which is exactly
+// how this stayed hidden — the new code was loading fine, but every
+// call to renderTopMovers() ran the Trends version, which targets
+// `moversBody` (not `topMoversBody`), found it null, and returned.
+function renderTop30Movers() {
   if (!DB || !currentLocation) return;
   const tbody = document.getElementById('topMoversBody');
   if (!tbody) return;
@@ -5950,7 +5958,7 @@ function renderTopMovers() {
 function exportTop30Workbook() {
   if (typeof XLSX === 'undefined') { toast('Excel library not loaded', 'error'); return; }
   if (!_top30InvRows.length && !_top30MoverRows.length) {
-    renderTopInvValue(); renderTopMovers();
+    renderTopInvValue(); renderTop30Movers();
     if (!_top30InvRows.length && !_top30MoverRows.length) { toast('Nothing to export yet', 'info'); return; }
   }
   const wb = XLSX.utils.book_new();
