@@ -10,7 +10,7 @@ echo  Downloading the newest files from GitHub...
 echo.
 
 set "REPO=ryanholmbeck/I3---Inventory-Intelligence"
-set "BRANCH=claude/resume-session-8Zpf0"
+set "BRANCH=main"
 set "BASE=https://raw.githubusercontent.com/%REPO%/%BRANCH%"
 
 :: Cache-buster so GitHub's CDN can't hand us a stale copy
