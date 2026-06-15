@@ -24,3 +24,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Supabase local config (holds keys) — never commit
+supabase/config.local.js
