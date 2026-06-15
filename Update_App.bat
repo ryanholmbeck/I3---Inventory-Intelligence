@@ -67,3 +67,21 @@ if exist "Update_App.bat.new" (
 
 echo.
 pause
+goto :eof
+
+:: ── download one file: GitHub raw -> .tmp -> size check -> atomic move ──
+:get
+echo  - %~1
+powershell -NoProfile -Command ^
+  "$ErrorActionPreference='Stop';" ^
+  "try {" ^
+  "  $u='%BASE%/%~1?cb=%T%';" ^
+  "  $tmp='%~1.tmp';" ^
+  "  Invoke-WebRequest -Uri $u -OutFile $tmp -Headers @{'Cache-Control'='no-cache'};" ^
+  "  if ((Get-Item $tmp).Length -lt 100) { throw 'downloaded file is too small' }" ^
+  "  Move-Item -Force $tmp '%~1';" ^
+  "} catch {" ^
+  "  Write-Host ('    FAILED: ' + $_.Exception.Message) -ForegroundColor Red;" ^
+  "  if (Test-Path $tmp) { Remove-Item $tmp -Force }" ^
+  "}"
+goto :eof
