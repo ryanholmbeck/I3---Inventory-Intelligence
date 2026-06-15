@@ -235,6 +235,8 @@ def build_schema(conn):
         qty_rni REAL DEFAULT 0, rni_value REAL DEFAULT 0,
         drop_shipment INTEGER DEFAULT 0, purchaser_code TEXT);
 
+    CREATE INDEX IF NOT EXISTS idx_po_item_loc ON purchase_orders(item_no, location_code);
+
     CREATE TABLE IF NOT EXISTS item_qoh (
         item_no TEXT, location_code TEXT, qty_on_hand REAL DEFAULT 0,
         PRIMARY KEY(item_no, location_code));
