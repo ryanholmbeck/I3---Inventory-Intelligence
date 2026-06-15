@@ -379,6 +379,7 @@ select option{background:var(--bg3)}
   <div class="tab active" onclick="switchStockTab('active',this)">Active Items</div>
   <div class="tab" onclick="switchStockTab('zero',this)">Zero Stock <span id="zeroStockBadge" style="background:rgba(224,82,82,.2);color:var(--red);border-radius:3px;padding:1px 5px;font-size:10px;margin-left:4px"></span></div>
   <div class="tab" onclick="switchStockTab('reorder',this)">Reorder Needed <span id="reorderBadge" style="background:rgba(245,166,35,.2);color:var(--amber);border-radius:3px;padding:1px 5px;font-size:10px;margin-left:4px"></span></div>
+  <div class="tab" onclick="switchStockTab('top30',this)">Top 30</div>
 </div>
 <div id="stockTab-active">
 <div class="filter-bar">
@@ -410,26 +411,25 @@ select option{background:var(--bg3)}
   </tr></thead><tbody id="reorderBody"><tr><td colspan="9" class="empty-state">Run ⚡ Recalculate to populate</td></tr></tbody></table></div>
 </div>
 
-<div class="card" style="margin-top:14px">
-  <div class="card-header">
-    <div class="card-title">💰 Top 30 Inventory Value — current location</div>
-    <button class="btn btn-ghost btn-sm" onclick="exportTopInvValueCSV()">📤 Export CSV</button>
+<div id="stockTab-top30" style="display:none">
+  <div class="filter-bar" style="justify-content:space-between">
+    <span style="font-size:12px;color:var(--text2)">Top 30 by value & by sales — current location</span>
+    <button class="btn btn-primary btn-sm" onclick="exportTop30Workbook()">📊 Download Workbook (.xlsx)</button>
   </div>
-  <div class="table-wrap"><table id="tbl-top-invval"><thead><tr>
-    <th>#</th><th>Item No.</th><th>Description</th><th>ABC</th>
-    <th>QoH</th><th>Unit Cost</th><th>On-Hand $</th>
-  </tr></thead><tbody id="topInvValueBody"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table></div>
-</div>
-
-<div class="card" style="margin-top:14px">
-  <div class="card-header">
-    <div class="card-title">📈 Top 30 Movers — Sales $ (trailing 6 months, from posted shipments)</div>
-    <button class="btn btn-ghost btn-sm" onclick="exportTopMoversCSV()">📤 Export CSV</button>
+  <div class="card" style="margin-top:10px">
+    <div class="card-header"><div class="card-title">💰 Top 30 Inventory Value</div></div>
+    <div class="table-wrap"><table id="tbl-top-invval"><thead><tr>
+      <th>#</th><th>Item No.</th><th>Description</th><th>ABC</th>
+      <th>QoH</th><th>Unit Cost</th><th>On-Hand $</th>
+    </tr></thead><tbody id="topInvValueBody"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table></div>
   </div>
-  <div class="table-wrap"><table id="tbl-top-movers"><thead><tr>
-    <th>#</th><th>Item No.</th><th>Description</th>
-    <th>Shipments</th><th>Qty Sold</th><th>Sales $</th>
-  </tr></thead><tbody id="topMoversBody"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table></div>
+  <div class="card" style="margin-top:14px">
+    <div class="card-header"><div class="card-title">📈 Top 30 Movers — Sales $ (trailing 6 months)</div></div>
+    <div class="table-wrap"><table id="tbl-top-movers"><thead><tr>
+      <th>#</th><th>Item No.</th><th>Description</th>
+      <th>Shipments</th><th>Qty Sold</th><th>Sales $</th>
+    </tr></thead><tbody id="topMoversBody"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table></div>
+  </div>
 </div>
 
     </div>
@@ -2004,7 +2004,7 @@ function showPage(id) {
   const fn = {
     dashboard: refreshDashboard,
     calculator: renderCalcTable,
-    stocking: () => { renderStockTable(); renderTopInvValue(); renderTopMovers(); },
+    stocking: renderStockTable,
     exceptions: () => renderAging(),
     spikes: renderSpikeLog,
     exclusions: renderExclusionRules,
@@ -5813,14 +5813,20 @@ function exportReorderCSV() {
 function switchStockTab(tab, el) {
   document.querySelectorAll('#stockTabs .tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');
-  ['active','zero','reorder'].forEach(t=>{
+  ['active','zero','reorder','top30'].forEach(t=>{
     const e=document.getElementById('stockTab-'+t); if(e) e.style.display='none';
   });
   const show=document.getElementById('stockTab-'+tab); if(show) show.style.display='block';
   if (tab==='active') renderStockTable();
   if (tab==='zero') renderZeroStock();
   if (tab==='reorder') renderReorderNeeded();
+  if (tab==='top30') { renderTopInvValue(); renderTopMovers(); }
 }
+
+// Cache the last-rendered rows so the XLSX export uses real numbers,
+// not the formatted strings in the DOM. Keyed by query, refreshed on render.
+let _top30InvRows = [];
+let _top30MoverRows = [];
 
 // ── Top 30 Inventory Value (current location) ─────────
 function renderTopInvValue() {
@@ -5828,16 +5834,19 @@ function renderTopInvValue() {
   const tbody = document.getElementById('topInvValueBody');
   if (!tbody) return;
   try {
+    // TRIM() on both sides guards against BC padding location_code with
+    // trailing whitespace, which silently breaks `= ?` joins.
     const r = DB.exec(`
       SELECT q.item_no, COALESCE(i.description,'') AS desc, COALESCE(c.abc_class,'') AS abc,
              q.qty_on_hand, COALESCE(i.unit_cost,0) AS uc,
              q.qty_on_hand * COALESCE(i.unit_cost,0) AS value
       FROM item_qoh q
       LEFT JOIN items i ON i.item_no=q.item_no
-      LEFT JOIN item_calculator c ON c.item_no=q.item_no AND c.location_code=q.location_code
-      WHERE q.location_code=? AND q.qty_on_hand>0 AND COALESCE(i.unit_cost,0)>0
+      LEFT JOIN item_calculator c ON c.item_no=q.item_no AND TRIM(c.location_code)=TRIM(q.location_code)
+      WHERE TRIM(q.location_code)=TRIM(?) AND q.qty_on_hand>0 AND COALESCE(i.unit_cost,0)>0
       ORDER BY value DESC LIMIT 30`, [currentLocation]);
     const data = r.length ? r[0].values : [];
+    _top30InvRows = data;
     if (!data.length) {
       tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No QoH data for this location</td></tr>';
       return;
@@ -5868,10 +5877,11 @@ function renderTopMovers() {
              COUNT(*) AS shipments, SUM(s.quantity) AS qty, SUM(s.amount) AS sales
       FROM sales_lines s
       LEFT JOIN items i ON i.item_no=s.item_no
-      WHERE s.location_code=? AND COALESCE(s.amount,0) > 0
+      WHERE TRIM(s.location_code)=TRIM(?) AND COALESCE(s.amount,0) > 0
       GROUP BY s.item_no
       ORDER BY sales DESC LIMIT 30`, [currentLocation]);
     const data = r.length ? r[0].values : [];
+    _top30MoverRows = data;
     if (!data.length) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No sales-line data for this location</td></tr>';
       return;
@@ -5890,22 +5900,63 @@ function renderTopMovers() {
   }
 }
 
-// CSV export for the top-30 tables — reads what's currently rendered.
-function _tableToCSV(tableId) {
-  const t = document.getElementById(tableId);
-  if (!t) return '';
-  return Array.from(t.querySelectorAll('tr')).map(row =>
-    Array.from(row.querySelectorAll('th,td')).map(cell => {
-      const v = (cell.innerText || '').replace(/"/g, '""');
-      return /[,"\n]/.test(v) ? `"${v}"` : v;
-    }).join(',')
-  ).join('\n');
-}
-function exportTopInvValueCSV() {
-  _download(_tableToCSV('tbl-top-invval'), `top30_inv_value_${currentLocation||'all'}.csv`, 'text/csv');
-}
-function exportTopMoversCSV() {
-  _download(_tableToCSV('tbl-top-movers'), `top30_movers_${currentLocation||'all'}.csv`, 'text/csv');
+// ── XLSX workbook — both Top 30 tables as separate sheets, with column
+// widths and currency / number formats so it lands looking like a real
+// report instead of raw CSV.
+function exportTop30Workbook() {
+  if (typeof XLSX === 'undefined') { toast('Excel library not loaded', 'error'); return; }
+  if (!_top30InvRows.length && !_top30MoverRows.length) {
+    renderTopInvValue(); renderTopMovers();
+    if (!_top30InvRows.length && !_top30MoverRows.length) { toast('Nothing to export yet', 'info'); return; }
+  }
+  const wb = XLSX.utils.book_new();
+  const ts = new Date().toISOString().slice(0,10);
+  const loc = currentLocation || 'all';
+
+  // Sheet 1 — Inventory Value
+  if (_top30InvRows.length) {
+    const headers = ['Rank','Item No.','Description','ABC','QoH','Unit Cost','On-Hand $'];
+    const rows = _top30InvRows.map(([no,desc,abc,qoh,uc,val],i) => [i+1, no, desc, abc||'', qoh||0, uc||0, val||0]);
+    const ws = XLSX.utils.aoa_to_sheet([
+      [`Top 30 Inventory Value — Location ${loc} — Generated ${ts}`],
+      [],
+      headers,
+      ...rows
+    ]);
+    ws['!cols'] = [{wch:6},{wch:18},{wch:42},{wch:6},{wch:10},{wch:12},{wch:14}];
+    ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:6}}];
+    // Currency format on Unit Cost (col F) and On-Hand $ (col G). Header is row 3 (0-indexed row 2),
+    // so data starts at row 4 (sheet row 4 = excel A4). Apply through end of data.
+    for (let i = 0; i < rows.length; i++) {
+      const row = 4 + i; // 1-indexed Excel row
+      ['F','G'].forEach(col => { const ref = col+row; if (ws[ref]) ws[ref].z = '"$"#,##0.00'; });
+      const qohRef = 'E'+row; if (ws[qohRef]) ws[qohRef].z = '#,##0';
+    }
+    XLSX.utils.book_append_sheet(wb, ws, 'Top 30 Inv Value');
+  }
+
+  // Sheet 2 — Movers
+  if (_top30MoverRows.length) {
+    const headers = ['Rank','Item No.','Description','Shipments','Qty Sold','Sales $'];
+    const rows = _top30MoverRows.map(([no,desc,ships,qty,sales],i) => [i+1, no, desc, ships||0, qty||0, sales||0]);
+    const ws = XLSX.utils.aoa_to_sheet([
+      [`Top 30 Movers (Trailing 6 mo) — Location ${loc} — Generated ${ts}`],
+      [],
+      headers,
+      ...rows
+    ]);
+    ws['!cols'] = [{wch:6},{wch:18},{wch:42},{wch:12},{wch:12},{wch:14}];
+    ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:5}}];
+    for (let i = 0; i < rows.length; i++) {
+      const row = 4 + i;
+      ['D','E'].forEach(col => { const ref = col+row; if (ws[ref]) ws[ref].z = '#,##0'; });
+      const salesRef = 'F'+row; if (ws[salesRef]) ws[salesRef].z = '"$"#,##0';
+    }
+    XLSX.utils.book_append_sheet(wb, ws, 'Top 30 Movers');
+  }
+
+  XLSX.writeFile(wb, `Top30_${loc}_${ts}.xlsx`);
+  toast('Top 30 workbook exported ✓', 'success');
 }
 
 function renderStockTable() {
