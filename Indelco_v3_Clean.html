@@ -2477,7 +2477,26 @@ function loadLocationDropdown() {
 
 function changeLocation() {
   currentLocation = document.getElementById('locationSelect').value;
-  if (currentLocation) refreshDashboard();
+  if (!currentLocation) return;
+  // Dashboard KPIs are always location-scoped — refresh them.
+  refreshDashboard();
+  // Re-render whatever location-scoped page/sub-tab is currently visible,
+  // otherwise switching locations leaves stale data on screen.
+  const active = document.querySelector('.page.active')?.id?.replace('page-','');
+  const visible = id => { const e=document.getElementById(id); return e && e.style.display!=='none'; };
+  try {
+    if (active === 'calculator') renderCalcTable();
+    else if (active === 'stocking') {
+      if (visible('stockTab-top30')) { renderTopInvValue(); renderTop30Movers(); }
+      else if (visible('stockTab-zero')) renderZeroStock();
+      else if (visible('stockTab-reorder')) renderReorderNeeded();
+      else renderStockTable();
+    }
+    else if (active === 'exceptions' && typeof renderAging==='function') renderAging();
+    else if (active === 'scorecard' && typeof renderScorecard==='function') renderScorecard();
+    else if (active === 'spikes' && typeof renderSpikeLog==='function') renderSpikeLog();
+    else if (active === 'trends' && typeof renderTrends==='function') renderTrends();
+  } catch(e) { console.warn('changeLocation re-render:', e?.message||e); }
 }
 
 function toggleAddLoc() {
