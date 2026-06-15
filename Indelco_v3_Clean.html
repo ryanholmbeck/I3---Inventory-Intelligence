@@ -379,7 +379,7 @@ select option{background:var(--bg3)}
   <div class="tab active" onclick="switchStockTab('active',this)">Active Items</div>
   <div class="tab" onclick="switchStockTab('zero',this)">Zero Stock <span id="zeroStockBadge" style="background:rgba(224,82,82,.2);color:var(--red);border-radius:3px;padding:1px 5px;font-size:10px;margin-left:4px"></span></div>
   <div class="tab" onclick="switchStockTab('reorder',this)">Reorder Needed <span id="reorderBadge" style="background:rgba(245,166,35,.2);color:var(--amber);border-radius:3px;padding:1px 5px;font-size:10px;margin-left:4px"></span></div>
-  <div class="tab" onclick="switchStockTab('top30',this)">Top 30</div>
+  <div class="tab" onclick="switchStockTab('top30',this)">Top 50</div>
 </div>
 <div id="stockTab-active">
 <div class="filter-bar">
@@ -414,7 +414,7 @@ select option{background:var(--bg3)}
 <div id="stockTab-top30" style="display:none">
   <div class="filter-bar" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <span style="font-size:12px;color:var(--text2)">Top 30 by value & by sales — current location</span>
+      <span style="font-size:12px;color:var(--text2)">Top 50 by value & by sales — current location</span>
       <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px">Movers lookback:
         <select id="topMoversLookback" class="form-select form-select-sm" onchange="renderTop30Movers()" title="Sales-line pull is currently 12 months from BC; older windows only have data after the next Daily Refresh with the updated pull.">
           <option value="3">3 months</option>
@@ -423,18 +423,22 @@ select option{background:var(--bg3)}
           <option value="12">12 months</option>
         </select>
       </label>
+      <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px;cursor:pointer" title="Hide movers that currently have zero on-hand at this location">
+        <input type="checkbox" id="topMoversNonzeroQoH" checked onchange="renderTop30Movers()">
+        Non-zero QoH only
+      </label>
     </div>
     <button class="btn btn-primary btn-sm" onclick="exportTop30Workbook()">📊 Download Workbook (.xlsx)</button>
   </div>
   <div class="card" style="margin-top:10px">
-    <div class="card-header"><div class="card-title">💰 Top 30 Inventory Value</div></div>
+    <div class="card-header"><div class="card-title">💰 Top 50 Inventory Value</div></div>
     <div class="table-wrap"><table id="tbl-top-invval"><thead><tr>
       <th>#</th><th>Item No.</th><th>Description</th><th>ABC</th>
       <th>QoH</th><th>Unit Cost</th><th>On-Hand $</th>
     </tr></thead><tbody id="topInvValueBody"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table></div>
   </div>
   <div class="card" style="margin-top:14px">
-    <div class="card-header"><div class="card-title">📈 Top 30 Movers — Sales $ (trailing 6 months)</div></div>
+    <div class="card-header"><div class="card-title">📈 Top 50 Movers — Sales $ (trailing 6 months)</div></div>
     <div class="table-wrap"><table id="tbl-top-movers"><thead><tr>
       <th>#</th><th>Item No.</th><th>Description</th>
       <th>QoH</th><th>Shipments</th><th>Qty Sold</th><th>Sales $</th>
@@ -5856,7 +5860,7 @@ function renderTopInvValue() {
       LEFT JOIN item_calculator c ON c.item_no=q.item_no AND TRIM(c.location_code)=TRIM(q.location_code)
       WHERE TRIM(q.location_code)=TRIM(?) AND q.qty_on_hand>0 AND COALESCE(i.unit_cost,0)>0
         AND COALESCE(c.excluded,0)=0
-      ORDER BY value DESC LIMIT 30`, [currentLocation]);
+      ORDER BY value DESC LIMIT 50`, [currentLocation]);
     const data = r.length ? r[0].values : [];
     _top30InvRows = data;
     if (!data.length) {
@@ -5899,26 +5903,31 @@ function renderTop30Movers() {
   const months = parseInt(document.getElementById('topMoversLookback')?.value || '6');
   const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - months);
   const cutoffStr = cutoff.toISOString().slice(0,10);
+  const nonzeroOnly = document.getElementById('topMoversNonzeroQoH')?.checked;
+  // When the toggle is on, drop zero-QoH movers BEFORE ranking, so we get
+  // the true top 50 of items we actually have in stock.
+  const havingClause = nonzeroOnly ? 'HAVING MAX(COALESCE(q.qty_on_hand,0)) > 0' : '';
 
-  // Two-step query: (1) aggregate sales_lines alone (fast, indexed),
-  // (2) join items only to the 30 winners. This avoids a giant
-  // LEFT JOIN that blew up against the full items table.
+  // Aggregate sales_lines with item_calculator (exclusions) and item_qoh
+  // (on-hand) joined — both per-location and small, so no WASM blowup like
+  // the 105K-row items table caused. Returns: item, shipments, qty, sales, qoh.
   let topData = [];
   try {
-    // LEFT JOIN to item_calculator (per-location, ~12K rows — safe size)
-    // so excluded items are filtered out. excluded=1 covers NONSTOCK,
-    // 00PROD, KIT1, etc. — whatever your active exclusion rules match.
     const r = DB.exec(`
-      SELECT s.item_no, COUNT(*) AS shipments, SUM(s.quantity) AS qty, SUM(s.amount) AS sales
+      SELECT s.item_no, COUNT(*) AS shipments, SUM(s.quantity) AS qty, SUM(s.amount) AS sales,
+             MAX(COALESCE(q.qty_on_hand,0)) AS qoh
       FROM sales_lines s
       LEFT JOIN item_calculator c
         ON c.item_no=s.item_no AND TRIM(c.location_code)=TRIM(s.location_code)
+      LEFT JOIN item_qoh q
+        ON q.item_no=s.item_no AND TRIM(q.location_code)=TRIM(s.location_code)
       WHERE TRIM(s.location_code)=TRIM(?)
         AND COALESCE(s.amount,0) > 0
         AND COALESCE(s.shipment_date,'') >= ?
         AND COALESCE(c.excluded,0) = 0
       GROUP BY s.item_no
-      ORDER BY sales DESC LIMIT 30`, [currentLocation, cutoffStr]);
+      ${havingClause}
+      ORDER BY sales DESC LIMIT 50`, [currentLocation, cutoffStr]);
     topData = (r && r[0] && r[0].values) ? r[0].values : [];
   } catch(e) {
     console.error('renderTopMovers agg:', e);
@@ -5928,26 +5937,22 @@ function renderTop30Movers() {
 
   if (!topData.length) {
     _top30MoverRows = [];
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">No sales in last ${months} months for this location</td></tr>`;
+    const why = nonzeroOnly ? ' with stock on hand' : '';
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">No sales${why} in last ${months} months for this location</td></tr>`;
     return;
   }
 
-  // Look up descriptions + QoH (at this location) for just the 30 winners.
+  // Descriptions for just the (up to 50) winners — small IN() lookup.
   const items = topData.map(r => r[0]);
   const placeholders = items.map(()=>'?').join(',');
-  let descMap = {}, qohMap = {};
+  let descMap = {};
   try {
     const dr = DB.exec(`SELECT item_no, description FROM items WHERE item_no IN (${placeholders})`, items);
     if (dr && dr[0]) for (const [ino, desc] of dr[0].values) descMap[ino] = desc || '';
   } catch(e) { console.warn('description lookup:', e?.message||e); }
-  try {
-    const qr = DB.exec(`SELECT item_no, qty_on_hand FROM item_qoh
-      WHERE TRIM(location_code)=TRIM(?) AND item_no IN (${placeholders})`, [currentLocation, ...items]);
-    if (qr && qr[0]) for (const [ino, qoh] of qr[0].values) qohMap[ino] = qoh || 0;
-  } catch(e) { console.warn('qoh lookup:', e?.message||e); }
 
   // Combine: [item, desc, qoh, shipments, qty, sales]
-  const data = topData.map(([no, ships, qty, sales]) => [no, descMap[no]||'', qohMap[no]||0, ships, qty, sales]);
+  const data = topData.map(([no, ships, qty, sales, qoh]) => [no, descMap[no]||'', qoh||0, ships, qty, sales]);
   _top30MoverRows = data;
 
   try {
@@ -5984,7 +5989,7 @@ function exportTop30Workbook() {
     const headers = ['Rank','Item No.','Description','ABC','QoH','Unit Cost','On-Hand $'];
     const rows = _top30InvRows.map(([no,desc,abc,qoh,uc,val],i) => [i+1, no, desc, abc||'', qoh||0, uc||0, val||0]);
     const ws = XLSX.utils.aoa_to_sheet([
-      [`Top 30 Inventory Value — Location ${loc} — Generated ${ts}`],
+      [`Top 50 Inventory Value — Location ${loc} — Generated ${ts}`],
       [],
       headers,
       ...rows
@@ -5998,7 +6003,7 @@ function exportTop30Workbook() {
       ['F','G'].forEach(col => { const ref = col+row; if (ws[ref]) ws[ref].z = '"$"#,##0.00'; });
       const qohRef = 'E'+row; if (ws[qohRef]) ws[qohRef].z = '#,##0';
     }
-    XLSX.utils.book_append_sheet(wb, ws, 'Top 30 Inv Value');
+    XLSX.utils.book_append_sheet(wb, ws, 'Top 50 Inv Value');
   }
 
   // Sheet 2 — Movers
@@ -6007,7 +6012,7 @@ function exportTop30Workbook() {
     const headers = ['Rank','Item No.','Description','QoH','Shipments','Qty Sold','Sales $'];
     const rows = _top30MoverRows.map(([no,desc,qoh,ships,qty,sales],i) => [i+1, no, desc, qoh||0, ships||0, qty||0, sales||0]);
     const ws = XLSX.utils.aoa_to_sheet([
-      [`Top 30 Movers (Trailing ${months} mo) — Location ${loc} — Generated ${ts}`],
+      [`Top 50 Movers (Trailing ${months} mo) — Location ${loc} — Generated ${ts}`],
       [],
       headers,
       ...rows
@@ -6019,7 +6024,7 @@ function exportTop30Workbook() {
       ['D','E','F'].forEach(col => { const ref = col+row; if (ws[ref]) ws[ref].z = '#,##0'; });
       const salesRef = 'G'+row; if (ws[salesRef]) ws[salesRef].z = '"$"#,##0';
     }
-    XLSX.utils.book_append_sheet(wb, ws, 'Top 30 Movers');
+    XLSX.utils.book_append_sheet(wb, ws, 'Top 50 Movers');
   }
 
   XLSX.writeFile(wb, `Top30_${loc}_${ts}.xlsx`);
