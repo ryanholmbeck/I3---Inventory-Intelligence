@@ -198,7 +198,7 @@ select option{background:var(--bg3)}
 <body>
 <div id="app">
 <nav id="sidebar">
-  <div class="sidebar-logo"><div class="wm">INDELCO</div><div class="tl">Inventory Intelligence v3</div><div id="version-banner" style="font-size:9px;color:var(--accent);font-family:monospace;margin-top:2px;letter-spacing:0.5px">v2026.06.15c</div><div id="sb-status" style="font-size:9px;font-family:monospace;margin-top:1px;letter-spacing:0.3px;color:var(--text3)">☁ checking…</div></div>
+  <div class="sidebar-logo"><div class="wm">INDELCO</div><div class="tl">Inventory Intelligence v3</div><div id="version-banner" style="font-size:9px;color:var(--accent);font-family:monospace;margin-top:2px;letter-spacing:0.5px">v2026.06.15d</div><div id="sb-status" style="font-size:9px;font-family:monospace;margin-top:1px;letter-spacing:0.3px;color:var(--text3)">☁ checking…</div></div>
   <div class="sidebar-loc">
     <label>Location</label>
     <select id="locationSelect" onchange="changeLocation()"><option value="">— select —</option></select>
@@ -1620,9 +1620,10 @@ async function initSQL() {
     showLoadDBPrompt();
   }
 
-  // Pull shared KPI goals from Supabase (async; refreshes dashboard when
-  // they arrive). No-op if Supabase isn't configured/reachable.
+  // Pull shared KPI goals + exclusion rules from Supabase (async; seed the
+  // cloud from local on first run, never wipe local). No-op if offline.
   loadGoalsFromSupabase();
+  loadRulesFromSupabase();
   checkSupabaseStatus();
 }
 
@@ -2755,6 +2756,11 @@ function addExclusionRule() {
   document.getElementById('exclValue').value = '';
   document.getElementById('exclReason').value = '';
   saveRulesToStorage();
+  sbUpsert('exclusion_rules', {
+    field_name: field, operator: op, field_value: val,
+    reason: reason || `${EXCL_FIELD_LABELS[field]||field} ${op.replace('_',' ')} ${val}`,
+    is_active: true
+  }, 'field_name,operator,field_value');
   toast(`Rule added: ${field} ${op} "${val}"`, 'success');
   renderExclusionRules();
 }
@@ -2763,14 +2769,27 @@ function addExclusionRule() {
 function toggleExclusionRule(id, active) {
   DB.run(`UPDATE exclusion_rules SET is_active=? WHERE id=?`, [active?1:0, id]);
   saveRulesToStorage();
+  // sync to cloud by natural key (the row still exists after the update)
+  const k = DB.exec(`SELECT field_name,operator,field_value,reason FROM exclusion_rules WHERE id=?`, [id]);
+  if (k.length && k[0].values.length) {
+    const [fn,op,fv,rs] = k[0].values[0];
+    sbUpsert('exclusion_rules', {field_name:fn, operator:op, field_value:fv, reason:rs, is_active: !!active}, 'field_name,operator,field_value');
+  }
   toast(`Rule ${active?'activated':'deactivated'}`, 'info');
   renderExclusionRules();
 }
 
 // ── Delete rule ───────────────────────────────────────────────────────
 function deleteExclusionRule(id) {
+  // capture the natural key BEFORE deleting so we can remove it from cloud
+  const k = DB.exec(`SELECT field_name,operator,field_value FROM exclusion_rules WHERE id=?`, [id]);
   DB.run(`DELETE FROM exclusion_rules WHERE id=?`, [id]);
   saveRulesToStorage();
+  if (k.length && k[0].values.length) {
+    const [fn,op,fv] = k[0].values[0];
+    sbDelete('exclusion_rules',
+      `field_name=eq.${encodeURIComponent(fn)}&operator=eq.${encodeURIComponent(op)}&field_value=eq.${encodeURIComponent(fv)}`);
+  }
   toast('Rule deleted', 'info');
   renderExclusionRules();
 }
@@ -3014,6 +3033,40 @@ function loadRulesFromStorage() {
 }
 
 
+// Push the local working set of rules up to Supabase (used to seed an
+// empty cloud table on first run, so existing local rules are never lost).
+async function pushAllRulesToSupabase() {
+  const r = DB.exec(`SELECT field_name,operator,field_value,reason,is_active FROM exclusion_rules`);
+  if (!r.length || !r[0].values.length) return;
+  const rows = r[0].values.map(([fn,op,fv,rs,act]) => ({
+    field_name: fn, operator: op, field_value: fv, reason: rs, is_active: act ? true : false
+  }));
+  await sbUpsert('exclusion_rules', rows, 'field_name,operator,field_value');
+}
+
+// Load rules from Supabase (cloud = source of truth). If cloud is empty,
+// seed it from whatever's local instead of wiping local. No-op offline.
+async function loadRulesFromSupabase() {
+  const rows = await sbSelect('exclusion_rules', 'select=field_name,operator,field_value,reason,is_active');
+  if (!rows) return;                 // offline — keep localStorage-loaded rules
+  if (rows.length === 0) {           // cloud empty — seed from local (one-time)
+    await pushAllRulesToSupabase();
+    return;
+  }
+  try { DB.run(`CREATE TABLE IF NOT EXISTS exclusion_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, field_name TEXT NOT NULL, operator TEXT NOT NULL,
+    field_value TEXT NOT NULL, reason TEXT, created_at TEXT DEFAULT (datetime('now')), is_active INTEGER DEFAULT 1)`); } catch(e) {}
+  DB.run(`DELETE FROM exclusion_rules`);
+  DB.run('BEGIN');
+  for (const r of rows) {
+    DB.run(`INSERT INTO exclusion_rules(field_name,operator,field_value,reason,is_active) VALUES(?,?,?,?,?)`,
+      [r.field_name, r.operator, r.field_value, r.reason, r.is_active ? 1 : 0]);
+  }
+  DB.run('COMMIT');
+  saveRulesToStorage();
+  if (typeof renderExclusionRules === 'function') renderExclusionRules();
+}
+
 function clearAndReseedRules() {
   if (!confirm('Reset all rules to defaults? This will remove any custom rules.')) return;
   DB.run(`DELETE FROM exclusion_rules`);
@@ -3032,6 +3085,8 @@ function clearAndReseedRules() {
   }
   DB.run('COMMIT');
   saveRulesToStorage();
+  // mirror the reset to cloud: clear all, then push the defaults
+  (async () => { await sbDelete('exclusion_rules', 'id=gt.0'); await pushAllRulesToSupabase(); })();
   toast('Rules reset to defaults','success');
   renderExclusionRules();
 }
