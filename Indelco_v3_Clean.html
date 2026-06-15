@@ -198,7 +198,7 @@ select option{background:var(--bg3)}
 <body>
 <div id="app">
 <nav id="sidebar">
-  <div class="sidebar-logo"><div class="wm">INDELCO</div><div class="tl">Inventory Intelligence v3</div><div id="version-banner" style="font-size:9px;color:var(--accent);font-family:monospace;margin-top:2px;letter-spacing:0.5px">v2026.05.12-QBR</div></div>
+  <div class="sidebar-logo"><div class="wm">INDELCO</div><div class="tl">Inventory Intelligence v3</div><div id="version-banner" style="font-size:9px;color:var(--accent);font-family:monospace;margin-top:2px;letter-spacing:0.5px">v2026.06.15a</div><div id="sb-status" style="font-size:9px;font-family:monospace;margin-top:1px;letter-spacing:0.3px;color:var(--text3)">☁ checking…</div></div>
   <div class="sidebar-loc">
     <label>Location</label>
     <select id="locationSelect" onchange="changeLocation()"><option value="">— select —</option></select>
@@ -1623,6 +1623,7 @@ async function initSQL() {
   // Pull shared KPI goals from Supabase (async; refreshes dashboard when
   // they arrive). No-op if Supabase isn't configured/reachable.
   loadGoalsFromSupabase();
+  checkSupabaseStatus();
 }
 
 function showDBStatus() {
@@ -5626,6 +5627,16 @@ async function sbDelete(table, query) {
 const KPI_GOALS_KEY = 'indelco_kpi_goals_v1';
 let _goalsCache = {};
 try { _goalsCache = JSON.parse(localStorage.getItem(KPI_GOALS_KEY) || '{}'); } catch(e) { _goalsCache = {}; }
+
+// Live connection indicator in the sidebar (☁ connected / offline / local).
+async function checkSupabaseStatus() {
+  const el = document.getElementById('sb-status');
+  if (!el) return;
+  if (!sbEnabled()) { el.textContent = '☁ local only'; el.style.color = 'var(--text3)'; return; }
+  const rows = await sbSelect('kpi_goals', 'select=goal_key&limit=1');
+  if (rows !== null) { el.textContent = '☁ Supabase connected'; el.style.color = 'var(--green)'; }
+  else { el.textContent = '☁ Supabase offline'; el.style.color = 'var(--amber)'; }
+}
 
 async function loadGoalsFromSupabase() {
   const rows = await sbSelect('kpi_goals', 'select=goal_key,goal_value');
