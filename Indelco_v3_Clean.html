@@ -85,6 +85,10 @@
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="vendor/jspdf.plugin.autotable.min.js"></script>
 <script src="vendor/xlsx.full.min.js"></script>
+<!-- Supabase connection (optional). If supabase/config.local.js is absent,
+     window.SUPABASE_CONFIG stays undefined and the app falls back to
+     localStorage-only persistence — no error, fully functional. -->
+<script src="supabase/config.local.js" onerror="console.info('No Supabase config — using local persistence only')"></script>
 <style>
 @font-face{font-family:'IBM Plex Sans';font-weight:300;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-sans-300.woff2') format('woff2')}
 @font-face{font-family:'IBM Plex Sans';font-weight:400;font-style:normal;font-display:swap;src:url('vendor/fonts/plex-sans-400.woff2') format('woff2')}
@@ -1615,6 +1619,10 @@ async function initSQL() {
   } else {
     showLoadDBPrompt();
   }
+
+  // Pull shared KPI goals from Supabase (async; refreshes dashboard when
+  // they arrive). No-op if Supabase isn't configured/reachable.
+  loadGoalsFromSupabase();
 }
 
 function showDBStatus() {
@@ -5566,19 +5574,80 @@ async function computeCalculator() {
 }
 
 
-// ── KPI goal targets (localStorage-backed so they survive reloads) ────
+// ── Supabase data layer (PostgREST over fetch — no library to vendor) ─
+// Shared, persistent user state. If config.local.js is absent or Supabase
+// is unreachable, every helper degrades to a no-op/null and callers fall
+// back to localStorage — the app stays fully functional offline.
+const SB = window.SUPABASE_CONFIG || null;
+function sbEnabled() { return !!(SB && SB.url && SB.anonKey); }
+function sbHeaders(extra) {
+  return Object.assign({
+    apikey: SB.anonKey,
+    Authorization: 'Bearer ' + SB.anonKey,
+    'Content-Type': 'application/json',
+  }, extra || {});
+}
+async function sbSelect(table, query='select=*') {
+  if (!sbEnabled()) return null;
+  try {
+    const r = await fetch(`${SB.url}/rest/v1/${table}?${query}`, { headers: sbHeaders() });
+    if (!r.ok) { console.warn('sbSelect', table, r.status); return null; }
+    return await r.json();
+  } catch(e) { console.warn('sbSelect', table, e.message); return null; }
+}
+async function sbUpsert(table, rows, onConflict) {
+  if (!sbEnabled()) return false;
+  try {
+    const q = onConflict ? `?on_conflict=${onConflict}` : '';
+    const r = await fetch(`${SB.url}/rest/v1/${table}${q}`, {
+      method: 'POST',
+      headers: sbHeaders({ Prefer: 'resolution=merge-duplicates,return=minimal' }),
+      body: JSON.stringify(Array.isArray(rows) ? rows : [rows]),
+    });
+    if (!r.ok) { console.warn('sbUpsert', table, r.status, await r.text()); return false; }
+    return true;
+  } catch(e) { console.warn('sbUpsert', table, e.message); return false; }
+}
+async function sbDelete(table, query) {
+  if (!sbEnabled()) return false;
+  try {
+    const r = await fetch(`${SB.url}/rest/v1/${table}?${query}`, {
+      method: 'DELETE', headers: sbHeaders({ Prefer: 'return=minimal' }),
+    });
+    return r.ok;
+  } catch(e) { console.warn('sbDelete', table, e.message); return false; }
+}
+
+// ── KPI goal targets (Supabase-backed, localStorage mirror + fallback) ─
+// getGoal is sync (called inside the KPI render loop), so goals live in an
+// in-memory cache: seeded from localStorage at parse time, refreshed from
+// Supabase at startup. setGoal writes cache + localStorage instantly and
+// upserts to Supabase fire-and-forget.
 const KPI_GOALS_KEY = 'indelco_kpi_goals_v1';
+let _goalsCache = {};
+try { _goalsCache = JSON.parse(localStorage.getItem(KPI_GOALS_KEY) || '{}'); } catch(e) { _goalsCache = {}; }
+
+async function loadGoalsFromSupabase() {
+  const rows = await sbSelect('kpi_goals', 'select=goal_key,goal_value');
+  if (!rows) return; // Supabase off/unreachable — keep localStorage cache
+  _goalsCache = {};
+  for (const r of rows) _goalsCache[r.goal_key] = r.goal_value;
+  try { localStorage.setItem(KPI_GOALS_KEY, JSON.stringify(_goalsCache)); } catch(e) {}
+  if (typeof populateGoalInputs === 'function') populateGoalInputs();
+  if (typeof refreshDashboard === 'function') refreshDashboard();
+}
 function getGoal(key) {
-  try { const g = JSON.parse(localStorage.getItem(KPI_GOALS_KEY) || '{}'); return g[key] ?? ''; }
-  catch (e) { return ''; }
+  const v = _goalsCache[key];
+  return (v === undefined || v === null) ? '' : v;
 }
 function setGoal(key, val) {
-  try {
-    const g = JSON.parse(localStorage.getItem(KPI_GOALS_KEY) || '{}');
-    if (val === '' || val == null) delete g[key]; else g[key] = val;
-    localStorage.setItem(KPI_GOALS_KEY, JSON.stringify(g));
-    if (typeof refreshDashboard === 'function') refreshDashboard();
-  } catch (e) { console.warn('setGoal:', e); }
+  if (val === '' || val == null) delete _goalsCache[key];
+  else _goalsCache[key] = parseFloat(val);
+  try { localStorage.setItem(KPI_GOALS_KEY, JSON.stringify(_goalsCache)); } catch (e) {}
+  // Persist to Supabase (fire-and-forget; localStorage already holds it).
+  if (val === '' || val == null) sbDelete('kpi_goals', `goal_key=eq.${encodeURIComponent(key)}`);
+  else sbUpsert('kpi_goals', { goal_key: key, goal_value: parseFloat(val) }, 'goal_key');
+  if (typeof refreshDashboard === 'function') refreshDashboard();
 }
 function populateGoalInputs() {
   document.querySelectorAll('[id^="goal-"]').forEach(el => {
