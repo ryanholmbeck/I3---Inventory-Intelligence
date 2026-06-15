@@ -437,8 +437,8 @@ select option{background:var(--bg3)}
     <div class="card-header"><div class="card-title">📈 Top 30 Movers — Sales $ (trailing 6 months)</div></div>
     <div class="table-wrap"><table id="tbl-top-movers"><thead><tr>
       <th>#</th><th>Item No.</th><th>Description</th>
-      <th>Shipments</th><th>Qty Sold</th><th>Sales $</th>
-    </tr></thead><tbody id="topMoversBody"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody></table></div>
+      <th>QoH</th><th>Shipments</th><th>Qty Sold</th><th>Sales $</th>
+    </tr></thead><tbody id="topMoversBody"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody></table></div>
   </div>
 </div>
 
@@ -5894,7 +5894,7 @@ function renderTop30Movers() {
   // Force a visible "Computing…" state immediately — if the SQL throws
   // inside sql.js WASM in a way that escapes JS catch, at least we know
   // the function entered.
-  tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Computing…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Computing…</td></tr>';
 
   const months = parseInt(document.getElementById('topMoversLookback')?.value || '6');
   const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - months);
@@ -5922,41 +5922,47 @@ function renderTop30Movers() {
     topData = (r && r[0] && r[0].values) ? r[0].values : [];
   } catch(e) {
     console.error('renderTopMovers agg:', e);
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e?.message||e}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Error: ${e?.message||e}</td></tr>`;
     return;
   }
 
   if (!topData.length) {
     _top30MoverRows = [];
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">No sales in last ${months} months for this location</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">No sales in last ${months} months for this location</td></tr>`;
     return;
   }
 
-  // Look up descriptions for just the 30 winners.
-  let descMap = {};
+  // Look up descriptions + QoH (at this location) for just the 30 winners.
+  const items = topData.map(r => r[0]);
+  const placeholders = items.map(()=>'?').join(',');
+  let descMap = {}, qohMap = {};
   try {
-    const items = topData.map(r => r[0]);
-    const placeholders = items.map(()=>'?').join(',');
     const dr = DB.exec(`SELECT item_no, description FROM items WHERE item_no IN (${placeholders})`, items);
     if (dr && dr[0]) for (const [ino, desc] of dr[0].values) descMap[ino] = desc || '';
   } catch(e) { console.warn('description lookup:', e?.message||e); }
+  try {
+    const qr = DB.exec(`SELECT item_no, qty_on_hand FROM item_qoh
+      WHERE TRIM(location_code)=TRIM(?) AND item_no IN (${placeholders})`, [currentLocation, ...items]);
+    if (qr && qr[0]) for (const [ino, qoh] of qr[0].values) qohMap[ino] = qoh || 0;
+  } catch(e) { console.warn('qoh lookup:', e?.message||e); }
 
-  // Combine
-  const data = topData.map(([no, ships, qty, sales]) => [no, descMap[no]||'', ships, qty, sales]);
+  // Combine: [item, desc, qoh, shipments, qty, sales]
+  const data = topData.map(([no, ships, qty, sales]) => [no, descMap[no]||'', qohMap[no]||0, ships, qty, sales]);
   _top30MoverRows = data;
 
   try {
-    tbody.innerHTML = data.map(([no,desc,ships,qty,sales],i) => `<tr>
+    tbody.innerHTML = data.map(([no,desc,qoh,ships,qty,sales],i) => `<tr>
       <td class="mono">${i+1}</td>
       <td class="mono">${no}</td>
       <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${(desc||'').slice(0,60)}</td>
+      <td class="mono ${(qoh||0)<=0?'red':''}">${fmtN(Math.round(qoh||0))}</td>
       <td class="mono">${fmtN(ships)}</td>
       <td class="mono">${fmtN(Math.round(qty||0))}</td>
       <td class="mono">$${fmtN(Math.round(sales||0))}</td>
     </tr>`).join('');
   } catch(e) {
     console.error('renderTopMovers render:', e);
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Render error: ${e?.message||e}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Render error: ${e?.message||e}</td></tr>`;
   }
 }
 
@@ -5997,20 +6003,21 @@ function exportTop30Workbook() {
 
   // Sheet 2 — Movers
   if (_top30MoverRows.length) {
-    const headers = ['Rank','Item No.','Description','Shipments','Qty Sold','Sales $'];
-    const rows = _top30MoverRows.map(([no,desc,ships,qty,sales],i) => [i+1, no, desc, ships||0, qty||0, sales||0]);
+    const months = parseInt(document.getElementById('topMoversLookback')?.value || '6');
+    const headers = ['Rank','Item No.','Description','QoH','Shipments','Qty Sold','Sales $'];
+    const rows = _top30MoverRows.map(([no,desc,qoh,ships,qty,sales],i) => [i+1, no, desc, qoh||0, ships||0, qty||0, sales||0]);
     const ws = XLSX.utils.aoa_to_sheet([
-      [`Top 30 Movers (Trailing 6 mo) — Location ${loc} — Generated ${ts}`],
+      [`Top 30 Movers (Trailing ${months} mo) — Location ${loc} — Generated ${ts}`],
       [],
       headers,
       ...rows
     ]);
-    ws['!cols'] = [{wch:6},{wch:18},{wch:42},{wch:12},{wch:12},{wch:14}];
-    ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:5}}];
+    ws['!cols'] = [{wch:6},{wch:18},{wch:42},{wch:10},{wch:12},{wch:12},{wch:14}];
+    ws['!merges'] = [{s:{r:0,c:0},e:{r:0,c:6}}];
     for (let i = 0; i < rows.length; i++) {
       const row = 4 + i;
-      ['D','E'].forEach(col => { const ref = col+row; if (ws[ref]) ws[ref].z = '#,##0'; });
-      const salesRef = 'F'+row; if (ws[salesRef]) ws[salesRef].z = '"$"#,##0';
+      ['D','E','F'].forEach(col => { const ref = col+row; if (ws[ref]) ws[ref].z = '#,##0'; });
+      const salesRef = 'G'+row; if (ws[salesRef]) ws[salesRef].z = '"$"#,##0';
     }
     XLSX.utils.book_append_sheet(wb, ws, 'Top 30 Movers');
   }
