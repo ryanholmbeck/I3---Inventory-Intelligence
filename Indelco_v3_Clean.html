@@ -1785,7 +1785,9 @@ function buildSchema() {
     maximum_order_qty REAL DEFAULT 0, reorder_quantity REAL DEFAULT 0,
     maximum_inventory REAL DEFAULT 0, costing_method TEXT, purchasing_code TEXT,
     sales_blocked INTEGER DEFAULT 0, purchasing_blocked INTEGER DEFAULT 0,
-    inventory_planning_group TEXT, drop_shipment_flag INTEGER DEFAULT 0)`);
+    inventory_planning_group TEXT, drop_shipment_flag INTEGER DEFAULT 0,
+    order_multiple REAL DEFAULT 0)`);
+  try { DB.run(`ALTER TABLE items ADD COLUMN order_multiple REAL DEFAULT 0`); } catch(e) {}
   DB.run(`CREATE TABLE IF NOT EXISTS ile_transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT, posting_date TEXT, entry_type TEXT,
     document_no TEXT, item_no TEXT NOT NULL, description TEXT, location_code TEXT,
@@ -5398,7 +5400,7 @@ async function computeCalculator() {
             COALESCE(i.unit_cost,0), COALESCE(i.lead_time_calc,''),
             COALESCE(i.inventory_planning_group,''),
             COALESCE(i.qty_on_hand,0), COALESCE(i.drop_shipment_flag,0),
-            COALESCE(b.std_box_qty,1),
+            COALESCE(NULLIF(i.order_multiple,0), b.std_box_qty, 1),
             COALESCE(e.excluded,0), COALESCE(e.reason,''),
             COALESCE(sup.nncr_flag,0), COALESCE(sup.customer_contract_flag,0),
             COALESCE(sup.drop_ship_only,0), COALESCE(sup.physical_space_available,1),

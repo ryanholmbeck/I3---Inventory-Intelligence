@@ -74,6 +74,7 @@ ITEM_ALIASES = {
     'minimum order quantity':'minimum_order_qty','min. order qty':'minimum_order_qty',
     'maximum order quantity':'maximum_order_qty','max. order qty':'maximum_order_qty',
     'reorder quantity':'reorder_quantity','maximum inventory':'maximum_inventory',
+    'order multiple':'order_multiple',
     'costing method':'costing_method','purchasing code':'purchasing_code',
     'sales blocked':'sales_blocked','purchasing blocked':'purchasing_blocked',
     'inventory planning group':'inventory_planning_group',
@@ -179,7 +180,7 @@ def build_schema(conn):
         purchasing_code TEXT, sales_blocked INTEGER DEFAULT 0,
         purchasing_blocked INTEGER DEFAULT 0,
         inventory_planning_group TEXT, drop_shipment_flag INTEGER DEFAULT 0,
-        item_tracking_code TEXT);
+        item_tracking_code TEXT, order_multiple REAL DEFAULT 0);
 
     CREATE TABLE IF NOT EXISTS ile_transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -440,8 +441,9 @@ def import_items(conn, filepath, company_source='INDELCO'):
                         reorder_point,safety_stock_qty,minimum_order_qty,
                         maximum_order_qty,reorder_quantity,maximum_inventory,
                         costing_method,purchasing_code,sales_blocked,
-                        purchasing_blocked,inventory_planning_group,drop_shipment_flag)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        purchasing_blocked,inventory_planning_group,drop_shipment_flag,
+                        order_multiple)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(item_no) DO UPDATE SET
                         description=excluded.description,
                         unit_cost=excluded.unit_cost,
@@ -451,7 +453,8 @@ def import_items(conn, filepath, company_source='INDELCO'):
                         inventory_posting_group=excluded.inventory_posting_group,
                         inventory_planning_group=excluded.inventory_planning_group,
                         safety_stock_qty=excluded.safety_stock_qty,
-                        reorder_point=excluded.reorder_point
+                        reorder_point=excluded.reorder_point,
+                        order_multiple=excluded.order_multiple
                 """, (no, row.get('description',''), row.get('description_2',''),
                     row.get('base_uom','EA'), pf(row.get('unit_cost')),
                     pf(row.get('standard_cost')), pf(row.get('unit_price')),
@@ -467,7 +470,8 @@ def import_items(conn, filepath, company_source='INDELCO'):
                     row.get('costing_method',''), row.get('purchasing_code',''),
                     pb(row.get('sales_blocked')), pb(row.get('purchasing_blocked')),
                     row.get('inventory_planning_group',''),
-                    pb(row.get('drop_shipment_flag'))))
+                    pb(row.get('drop_shipment_flag')),
+                    pf(row.get('order_multiple'))))
                 inserted += 1
             except Exception as e:
                 rejected += 1

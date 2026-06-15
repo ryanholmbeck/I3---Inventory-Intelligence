@@ -150,6 +150,7 @@ def pull_items(conn, company='Indelco Plastics', out=OUTPUT_DIR):
         [Maximum Order Quantity],
         [Reorder Quantity],
         [Maximum Inventory],
+        [Order Multiple],
         [Costing Method],
         [Purchasing Code],
         [Sales Blocked],
