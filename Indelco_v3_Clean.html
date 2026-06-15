@@ -198,7 +198,7 @@ select option{background:var(--bg3)}
 <body>
 <div id="app">
 <nav id="sidebar">
-  <div class="sidebar-logo"><div class="wm">INDELCO</div><div class="tl">Inventory Intelligence v3</div><div id="version-banner" style="font-size:9px;color:var(--accent);font-family:monospace;margin-top:2px;letter-spacing:0.5px">v2026.06.15a</div><div id="sb-status" style="font-size:9px;font-family:monospace;margin-top:1px;letter-spacing:0.3px;color:var(--text3)">☁ checking…</div></div>
+  <div class="sidebar-logo"><div class="wm">INDELCO</div><div class="tl">Inventory Intelligence v3</div><div id="version-banner" style="font-size:9px;color:var(--accent);font-family:monospace;margin-top:2px;letter-spacing:0.5px">v2026.06.15b</div><div id="sb-status" style="font-size:9px;font-family:monospace;margin-top:1px;letter-spacing:0.3px;color:var(--text3)">☁ checking…</div></div>
   <div class="sidebar-loc">
     <label>Location</label>
     <select id="locationSelect" onchange="changeLocation()"><option value="">— select —</option></select>
@@ -5354,6 +5354,10 @@ async function computeCalculator() {
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_sales REAL DEFAULT 0`); } catch(e) {}
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN adu_mfg REAL DEFAULT 0`); } catch(e) {}
   try { DB.run(`ALTER TABLE item_calculator ADD COLUMN vendor_no TEXT`); } catch(e) {}
+  // order_multiple lives on items; the loaded server DB may predate it
+  // (buildSchema's ALTER only runs for a freshly-created DB). Ensure it
+  // exists before the calc query references i.order_multiple.
+  try { DB.run(`ALTER TABLE items ADD COLUMN order_multiple REAL DEFAULT 0`); } catch(e) {}
   try { DB.run(`ALTER TABLE exclusion_rules ADD COLUMN is_active INTEGER DEFAULT 1`); } catch(e) {}
 
   // ── Pre-fetch all per-item lookups in bulk (was 2 DB.exec calls PER item) ───
