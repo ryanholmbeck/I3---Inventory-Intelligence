@@ -412,8 +412,18 @@ select option{background:var(--bg3)}
 </div>
 
 <div id="stockTab-top30" style="display:none">
-  <div class="filter-bar" style="justify-content:space-between">
-    <span style="font-size:12px;color:var(--text2)">Top 30 by value & by sales — current location</span>
+  <div class="filter-bar" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span style="font-size:12px;color:var(--text2)">Top 30 by value & by sales — current location</span>
+      <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px">Movers lookback:
+        <select id="topMoversLookback" class="form-select form-select-sm" onchange="renderTopMovers()" title="Sales-line pull is currently 12 months from BC; older windows only have data after the next Daily Refresh with the updated pull.">
+          <option value="3">3 months</option>
+          <option value="6" selected>6 months</option>
+          <option value="9">9 months</option>
+          <option value="12">12 months</option>
+        </select>
+      </label>
+    </div>
     <button class="btn btn-primary btn-sm" onclick="exportTop30Workbook()">📊 Download Workbook (.xlsx)</button>
   </div>
   <div class="card" style="margin-top:10px">
@@ -5871,21 +5881,55 @@ function renderTopMovers() {
   if (!DB || !currentLocation) return;
   const tbody = document.getElementById('topMoversBody');
   if (!tbody) return;
+  // Force a visible "Computing…" state immediately — if the SQL throws
+  // inside sql.js WASM in a way that escapes JS catch, at least we know
+  // the function entered.
+  tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Computing…</td></tr>';
+
+  const months = parseInt(document.getElementById('topMoversLookback')?.value || '6');
+  const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - months);
+  const cutoffStr = cutoff.toISOString().slice(0,10);
+
+  // Two-step query: (1) aggregate sales_lines alone (fast, indexed),
+  // (2) join items only to the 30 winners. This avoids a giant
+  // LEFT JOIN that blew up against the full items table.
+  let topData = [];
   try {
     const r = DB.exec(`
-      SELECT s.item_no, COALESCE(i.description,'') AS desc,
-             COUNT(*) AS shipments, SUM(s.quantity) AS qty, SUM(s.amount) AS sales
+      SELECT s.item_no, COUNT(*) AS shipments, SUM(s.quantity) AS qty, SUM(s.amount) AS sales
       FROM sales_lines s
-      LEFT JOIN items i ON i.item_no=s.item_no
-      WHERE TRIM(s.location_code)=TRIM(?) AND COALESCE(s.amount,0) > 0
+      WHERE TRIM(s.location_code)=TRIM(?)
+        AND COALESCE(s.amount,0) > 0
+        AND COALESCE(s.shipment_date,'') >= ?
       GROUP BY s.item_no
-      ORDER BY sales DESC LIMIT 30`, [currentLocation]);
-    const data = r.length ? r[0].values : [];
-    _top30MoverRows = data;
-    if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No sales-line data for this location</td></tr>';
-      return;
-    }
+      ORDER BY sales DESC LIMIT 30`, [currentLocation, cutoffStr]);
+    topData = (r && r[0] && r[0].values) ? r[0].values : [];
+  } catch(e) {
+    console.error('renderTopMovers agg:', e);
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e?.message||e}</td></tr>`;
+    return;
+  }
+
+  if (!topData.length) {
+    _top30MoverRows = [];
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">No sales in last ${months} months for this location</td></tr>`;
+    return;
+  }
+
+  // Look up descriptions for just the 30 winners.
+  let descMap = {};
+  try {
+    const items = topData.map(r => r[0]);
+    const placeholders = items.map(()=>'?').join(',');
+    const dr = DB.exec(`SELECT item_no, description FROM items WHERE item_no IN (${placeholders})`, items);
+    if (dr && dr[0]) for (const [ino, desc] of dr[0].values) descMap[ino] = desc || '';
+  } catch(e) { console.warn('description lookup:', e?.message||e); }
+
+  // Combine
+  const data = topData.map(([no, ships, qty, sales]) => [no, descMap[no]||'', ships, qty, sales]);
+  _top30MoverRows = data;
+
+  try {
     tbody.innerHTML = data.map(([no,desc,ships,qty,sales],i) => `<tr>
       <td class="mono">${i+1}</td>
       <td class="mono">${no}</td>
@@ -5895,8 +5939,8 @@ function renderTopMovers() {
       <td class="mono">$${fmtN(Math.round(sales||0))}</td>
     </tr>`).join('');
   } catch(e) {
-    console.error('renderTopMovers:', e);
-    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
+    console.error('renderTopMovers render:', e);
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Render error: ${e?.message||e}</td></tr>`;
   }
 }
 

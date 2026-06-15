@@ -701,7 +701,7 @@ def export_sales_lines(conn, company, out_dir, guid=GUID):
         FROM {tbl} ssl
         WHERE ssl.[No_] IS NOT NULL AND ssl.[No_] != ''
           AND ssl.[Type] = 2
-          AND ssl.[Posting Date] >= DATEADD(month, -6, GETDATE())
+          AND ssl.[Posting Date] >= DATEADD(month, -12, GETDATE())
     """
     try:
         return _to_csv(conn, sql, Path(out_dir) / f'SalesLines_{short}_{_today()}.csv')
