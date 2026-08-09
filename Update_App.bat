@@ -20,6 +20,7 @@ set "T=%RANDOM%%RANDOM%"
 
 :: App files kept in sync. The HTML is the main one; the others change rarely.
 call :get "Indelco_v3_Clean.html"
+call :get "Backlog_Review.html"
 call :get "build_db.py"
 call :get "server.py"
 call :get "Indelco_SSMS_Connector.py"

@@ -48,6 +48,22 @@ class IndelcoHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        # Workstation identity for the Backlog Review app — returns the
+        # Windows user (DOMAIN\user) so edits can be attributed without a
+        # login wall. Matches the salesperson key format (FLUIDFLOW\user).
+        if self.path == '/whoami':
+            import getpass, os
+            dom = os.environ.get('USERDOMAIN', '')
+            usr = os.environ.get('USERNAME') or getpass.getuser()
+            who = f'{dom}\\{usr}' if dom else usr
+            data = json.dumps({'user': who, 'username': usr, 'domain': dom}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         # Serve indelco.db as binary
         if self.path == '/indelco.db':
             if not DB_FILE.exists():

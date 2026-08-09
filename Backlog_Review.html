@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backlog Review — Daily Order Review & Month-End Forecast</title>
+<script src="vendor/papaparse.min.js"></script>
+<script src="supabase/config.local.js" onerror="console.info('No Supabase config — local only')"></script>
+<style>
+:root{--bg:#0f1117;--bg2:#171b26;--bg3:#1e2333;--border:#2d3448;--border2:#3a4260;
+--text:#e8eaf0;--text2:#9aa3b8;--text3:#5d6680;--accent:#4d7cfe;--green:#2ec27e;
+--amber:#f5a623;--red:#e05252;--teal:#26c4c4;--purple:#a569e0;--r:8px;
+--font:'Segoe UI',system-ui,sans-serif;--mono:'Consolas',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px}
+#top{display:flex;align-items:center;gap:16px;padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--border)}
+#top h1{font-size:15px;font-weight:600}
+.tag{font-size:10px;font-family:var(--mono);color:var(--text3)}
+.spacer{flex:1}
+#sb-status{font-size:11px;font-family:var(--mono)}
+#whoami{font-size:11px;color:var(--text2);font-family:var(--mono)}
+.tabs{display:flex;gap:2px;padding:0 18px;background:var(--bg2);border-bottom:1px solid var(--border)}
+.tab{padding:9px 16px;cursor:pointer;color:var(--text2);font-size:13px;border-bottom:2px solid transparent}
+.tab.active{color:var(--text);border-bottom-color:var(--accent)}
+#content{padding:16px 18px}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.bar input[type=text],.bar select{background:var(--bg3);border:1px solid var(--border);color:var(--text);
+padding:6px 9px;border-radius:var(--r);font-size:12px;font-family:var(--font)}
+.bar label{font-size:11px;color:var(--text2);display:flex;align-items:center;gap:5px}
+.btn{background:var(--accent);border:none;color:#fff;padding:7px 13px;border-radius:var(--r);cursor:pointer;font-size:12px}
+.btn.ghost{background:var(--bg3);border:1px solid var(--border);color:var(--text)}
+.drop{border:2px dashed var(--border2);border-radius:var(--r);padding:14px;text-align:center;color:var(--text2);cursor:pointer}
+.drop.over{border-color:var(--accent);background:rgba(77,124,254,.08)}
+.wrap{overflow:auto;border:1px solid var(--border);border-radius:var(--r);max-height:calc(100vh - 230px)}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{padding:6px 9px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--border)}
+th{background:var(--bg3);position:sticky;top:0;color:var(--text2);font-weight:600;z-index:1}
+tr:hover td{background:rgba(255,255,255,.02)}
+td.num,th.num{text-align:right;font-family:var(--mono)}
+td.mono{font-family:var(--mono)}
+.pill{padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600}
+.pill.yes{background:rgba(46,194,126,.16);color:var(--green)}
+.pill.no{background:rgba(224,82,82,.16);color:var(--red)}
+.pill.new{background:rgba(245,166,35,.16);color:var(--amber)}
+td select,td input{background:var(--bg3);border:1px solid var(--border);color:var(--text);
+padding:3px 5px;border-radius:5px;font-size:11px;font-family:var(--font);width:100%}
+.empty{text-align:center;color:var(--text3);padding:26px}
+.kpi-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.kpi{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:12px 16px;min-width:150px}
+.kpi .l{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--text3)}
+.kpi .v{font-size:20px;font-weight:600;font-family:var(--mono);margin-top:4px}
+.green{color:var(--green)}.amber{color:var(--amber)}.red{color:var(--red)}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px;margin-bottom:14px}
+.card h3{font-size:13px;margin-bottom:10px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="top">
+  <h1>📋 Backlog Review</h1>
+  <span class="tag" id="ver">v0.1</span>
+  <span class="tag" id="asof"></span>
+  <div class="spacer"></div>
+  <span id="whoami">…</span>
+  <span id="sb-status">☁ checking…</span>
+</div>
+<div class="tabs">
+  <div class="tab active" data-view="review" onclick="switchView('review',this)">Order Review</div>
+  <div class="tab" data-view="projection" onclick="switchView('projection',this)">Month-End Projection</div>
+  <div class="tab" data-view="inputs" onclick="switchView('inputs',this)">Pacing Inputs</div>
+</div>
+<div id="content">
+
+  <!-- data load -->
+  <div class="bar" id="loadbar">
+    <div class="drop" id="drop" style="flex:1" onclick="document.getElementById('file').click()">
+      Drop the daily <b>Source Sales Lines</b> CSV here, or click to choose. (Refresh script will automate this later.)
+      <input type="file" id="file" accept=".csv" class="hidden">
+    </div>
+    <span class="tag" id="loadinfo"></span>
+  </div>
+
+  <!-- REVIEW VIEW -->
+  <div id="view-review">
+    <div class="bar">
+      <label>Salesperson <select id="fSales"><option value="">All</option></select></label>
+      <label>Budget Group <select id="fGroup"><option value="">All</option></select></label>
+      <label>Branch <select id="fBranch"><option value="">All</option></select></label>
+      <label>Status <select id="fStatus">
+        <option value="">All</option><option value="new">Not Reviewed</option>
+        <option value="yes">Ship This Month</option><option value="no">Not Shipping</option></select></label>
+      <input type="text" id="fSearch" placeholder="Search order / customer…" style="width:200px">
+      <label><input type="checkbox" id="fMine"> Only mine</label>
+      <span class="spacer"></span>
+      <span class="tag" id="revcount"></span>
+    </div>
+    <div class="wrap"><table id="tblReview">
+      <thead><tr>
+        <th>Order</th><th>Customer</th><th>Branch</th><th>Salesperson</th>
+        <th class="num">Total $</th><th class="num">In Stock $</th><th class="num">Needs PO $</th><th class="num">On PO $</th>
+        <th>Earliest Ship</th><th class="num">Days Late</th>
+        <th>Ship This Mo</th><th>Reviewed Ship Date</th><th>If Not, Why</th><th>Notes</th><th>Owner</th><th>By</th>
+      </tr></thead>
+      <tbody id="revBody"><tr><td colspan="16" class="empty">Load the Source Sales Lines CSV to begin.</td></tr></tbody>
+    </table></div>
+  </div>
+
+  <!-- PROJECTION VIEW -->
+  <div id="view-projection" class="hidden">
+    <div class="kpi-row" id="projKpis"></div>
+    <div class="wrap"><table id="tblProj">
+      <thead><tr>
+        <th>Budget Group</th><th class="num">Budget</th><th class="num">Forecast</th>
+        <th class="num">Invoiced MTD</th><th class="num">SNI</th><th class="num">Confirmed Backlog</th>
+        <th class="num">Pace/WD</th><th class="num">Run-Rate $</th><th class="num">Projected Month-End</th>
+        <th class="num">Gap to Budget</th><th class="num">Gap to Forecast</th><th class="num">Req Pace/WD</th>
+      </tr></thead>
+      <tbody id="projBody"><tr><td colspan="12" class="empty">Load data + set pacing inputs.</td></tr></tbody>
+    </table></div>
+  </div>
+
+  <!-- PACING INPUTS VIEW -->
+  <div id="view-inputs" class="hidden">
+    <div class="card">
+      <h3>Monthly Targets (per Budget Group) — admin only</h3>
+      <div class="wrap" style="max-height:none"><table id="tblPacing">
+        <thead><tr><th>Budget Group</th><th class="num">Monthly Budget</th><th class="num">Monthly Forecast</th><th class="num">Current SNI</th></tr></thead>
+        <tbody id="pacingBody"></tbody>
+      </table></div>
+      <div style="margin-top:10px"><button class="btn" onclick="savePacing()">💾 Save Targets</button>
+        <span class="tag" id="pacingMsg"></span></div>
+    </div>
+    <div class="card">
+      <h3>Daily Invoiced Shipments — quick entry</h3>
+      <div class="bar">
+        <label>Date <input type="text" id="diDate" placeholder="YYYY-MM-DD" style="width:120px"></label>
+        <label>Budget Group <select id="diGroup"></select></label>
+        <label>Amount <input type="text" id="diAmt" placeholder="0" style="width:120px"></label>
+        <button class="btn" onclick="saveDaily()">Add / Update</button>
+        <span class="tag" id="diMsg"></span>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script>
+// ── config / state ───────────────────────────────────────────────────
+const SB = window.SUPABASE_CONFIG || null;
+const BUDGET_GROUPS = ['MN','Branches','QS','Ayer','CorrTech','Centrex'];
+let WHO = '';                 // workstation user (DOMAIN\user)
+let ORDERS = [];              // summarized orders from CSV
+let REVIEWS = {};             // document_no -> review row (Supabase)
+let GMAP = {};                // location_code -> {name, group}
+let PACING = {};              // 'group' -> {budget,forecast,sni}
+let DAILY = [];               // {invoice_date, budget_group, amount}
+const PERIOD = new Date().toISOString().slice(0,7);
+
+// ── Supabase (PostgREST over fetch) ──────────────────────────────────
+function sbOn(){return !!(SB&&SB.url&&SB.anonKey);}
+function sbH(x){return Object.assign({apikey:SB.anonKey,Authorization:'Bearer '+SB.anonKey,'Content-Type':'application/json'},x||{});}
+async function sbSel(t,q='select=*'){if(!sbOn())return null;try{const r=await fetch(`${SB.url}/rest/v1/${t}?${q}`,{headers:sbH()});return r.ok?await r.json():null;}catch(e){console.warn('sel',t,e.message);return null;}}
+async function sbUp(t,rows,oc){if(!sbOn())return false;try{const q=oc?`?on_conflict=${oc}`:'';const r=await fetch(`${SB.url}/rest/v1/${t}${q}`,{method:'POST',headers:sbH({Prefer:'resolution=merge-duplicates,return=minimal'}),body:JSON.stringify(Array.isArray(rows)?rows:[rows])});if(!r.ok)console.warn('up',t,r.status,await r.text());return r.ok;}catch(e){console.warn('up',t,e.message);return false;}}
+
+// ── helpers ──────────────────────────────────────────────────────────
+const $=id=>document.getElementById(id);
+const num=v=>{const n=parseFloat(String(v==null?'':v).replace(/[$,]/g,''));return isNaN(n)?0:n;};
+const money=v=>'$'+Math.round(v||0).toLocaleString();
+const clean=s=>String(s==null?'':s).trim();
+function dstr(v){if(!v)return '';const d=new Date(v);return isNaN(d)?clean(v).slice(0,10):d.toISOString().slice(0,10);}
+function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=d.getDay();if(w!==0&&w!==6)n++;d.setDate(d.getDate()+1);}return n;}
+
+// ── init ─────────────────────────────────────────────────────────────
+(async function init(){
+  // identity
+  try{const r=await fetch('/whoami');if(r.ok){WHO=(await r.json()).user||'';}}catch(e){}
+  $('whoami').textContent='👤 '+(WHO||'unknown');
+  // supabase status
+  const st=$('sb-status');
+  if(!sbOn()){st.textContent='☁ local only';st.style.color='var(--text3)';}
+  else{const t=await sbSel('bl_budget_group_map','select=location_code&limit=1');
+    if(t!==null){st.textContent='☁ connected';st.style.color='var(--green)';}
+    else{st.textContent='☁ offline';st.style.color='var(--amber)';}}
+  // as-of
+  const now=new Date();
+  const mEnd=new Date(now.getFullYear(),now.getMonth()+1,0);
+  $('asof').textContent=`as of ${now.toISOString().slice(0,10)} · ME ${mEnd.toISOString().slice(0,10)}`;
+  // load config tables
+  const gm=await sbSel('bl_budget_group_map','select=location_code,location_name,budget_group');
+  if(gm)gm.forEach(r=>GMAP[clean(r.location_code)]={name:r.location_name,group:r.budget_group});
+  await loadReviews(); await loadPacing();
+  // budget group dropdowns
+  BUDGET_GROUPS.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;$('fGroup').appendChild(o);
+    const o2=o.cloneNode(true);$('diGroup').appendChild(o2);});
+  buildPacingEditor();
+  // file handlers
+  $('file').addEventListener('change',e=>{if(e.target.files[0])loadCSV(e.target.files[0]);});
+  const dz=$('drop');
+  ['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('over');}));
+  ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('over');}));
+  dz.addEventListener('drop',e=>{if(e.dataTransfer.files[0])loadCSV(e.dataTransfer.files[0]);});
+  ['fSales','fGroup','fBranch','fStatus','fMine'].forEach(id=>$(id).addEventListener('change',renderReview));
+  $('fSearch').addEventListener('input',renderReview);
+})();
+
+async function loadReviews(){REVIEWS={};const r=await sbSel('bl_order_review','select=*');if(r)r.forEach(x=>REVIEWS[x.document_no]=x);}
+async function loadPacing(){
+  PACING={};const p=await sbSel('bl_pacing_input',`select=*&period=eq.${PERIOD}`);
+  if(p)p.forEach(x=>PACING[x.budget_group]={budget:x.monthly_budget,forecast:x.monthly_forecast,sni:x.current_sni});
+  const d=await sbSel('bl_daily_invoiced','select=*');DAILY=d||[];
+}
+
+// ── CSV load → normalize → summarize ─────────────────────────────────
+function loadCSV(file){
+  $('loadinfo').textContent='parsing…';
+  Papa.parse(file,{header:true,skipEmptyLines:true,complete:res=>{
+    const lines=res.data.map(normalizeLine).filter(l=>l.document_no);
+    ORDERS=summarize(lines);
+    $('loadinfo').textContent=`${lines.length.toLocaleString()} lines · ${ORDERS.length.toLocaleString()} orders · ${file.name}`;
+    populateFilters(); renderReview(); renderProjection();
+  }});
+}
+function col(row,...names){for(const n of names){for(const k in row){if(k.toLowerCase().trim()===n.toLowerCase()){return row[k];}}}return '';}
+function normalizeLine(row){
+  const loc=clean(col(row,'Location Code'));
+  return {
+    document_no:clean(col(row,'Document No.')),
+    customer_no:clean(col(row,'Sell-to Customer No.')),
+    location_code:loc,
+    branch_name:clean(col(row,'Branch Name')),
+    salesperson:clean(col(row,'Salesperson')),
+    outstanding_amount:num(col(row,'Outstanding Amount','Line Amount Excl. Tax')),
+    outstanding_qty:num(col(row,'Outstanding Quantity')),
+    qty_on_hand:num(col(row,'Quantity on Hand')),
+    po_number:clean(col(row,'PO Number')),
+    on_po:num(col(row,'On PO')),
+    shipment_date:dstr(col(row,'Shipment Date')),
+    is_ds:clean(col(row,'Is DS')),
+    budget_group:(GMAP[loc]&&GMAP[loc].group)||'',
+  };
+}
+function summarize(lines){
+  const m={};
+  for(const l of lines){
+    let o=m[l.document_no];
+    if(!o){o={document_no:l.document_no,customer_no:l.customer_no,branch_name:l.branch_name,
+      salesperson:l.salesperson,budget_group:l.budget_group,total:0,in_stock:0,needs_po:0,on_po:0,
+      earliest:'',lines:0};m[l.document_no]=o;}
+    o.total+=l.outstanding_amount; o.lines++;
+    // line classification
+    if(l.po_number||l.on_po>0)o.on_po+=l.outstanding_amount;
+    else if(l.qty_on_hand>=l.outstanding_qty)o.in_stock+=l.outstanding_amount;
+    else o.needs_po+=l.outstanding_amount;
+    if(l.shipment_date&&(!o.earliest||l.shipment_date<o.earliest))o.earliest=l.shipment_date;
+  }
+  const today=new Date().toISOString().slice(0,10);
+  return Object.values(m).map(o=>{
+    o.days_late=(o.earliest&&o.earliest<today)?workingDays(new Date(o.earliest),new Date(today)):0;
+    return o;
+  }).sort((a,b)=>b.total-a.total);
+}
+
+function populateFilters(){
+  const sales=[...new Set(ORDERS.map(o=>o.salesperson).filter(Boolean))].sort();
+  const br=[...new Set(ORDERS.map(o=>o.branch_name).filter(Boolean))].sort();
+  fill($('fSales'),sales); fill($('fBranch'),br);
+}
+function fill(sel,vals){const cur=sel.value;sel.innerHTML='<option value="">All</option>';
+  vals.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;sel.appendChild(o);});sel.value=cur;}
+
+// ── Review grid ──────────────────────────────────────────────────────
+function renderReview(){
+  const fs=$('fSales').value,fg=$('fGroup').value,fb=$('fBranch').value,fst=$('fStatus').value,
+    q=$('fSearch').value.toLowerCase(),mine=$('fMine').checked;
+  let rows=ORDERS.filter(o=>{
+    if(fs&&o.salesperson!==fs)return false;
+    if(fg&&o.budget_group!==fg)return false;
+    if(fb&&o.branch_name!==fb)return false;
+    if(mine&&WHO&&o.salesperson.toUpperCase()!==WHO.toUpperCase())return false;
+    const rv=REVIEWS[o.document_no]||{};
+    if(fst==='new'&&(rv.ship_this_month))return false;
+    if(fst==='yes'&&rv.ship_this_month!=='Yes')return false;
+    if(fst==='no'&&rv.ship_this_month!=='No')return false;
+    if(q&&!(o.document_no.toLowerCase().includes(q)||(o.customer_no||'').toLowerCase().includes(q)))return false;
+    return true;
+  });
+  $('revcount').textContent=`${rows.length.toLocaleString()} orders · ${money(rows.reduce((s,o)=>s+o.total,0))}`;
+  const b=$('revBody');
+  if(!rows.length){b.innerHTML='<tr><td colspan="16" class="empty">No orders match.</td></tr>';return;}
+  b.innerHTML=rows.slice(0,1000).map(o=>{
+    const rv=REVIEWS[o.document_no]||{};
+    const stm=rv.ship_this_month||'';
+    return `<tr>
+      <td class="mono">${o.document_no}</td><td class="mono">${o.customer_no||''}</td>
+      <td>${(o.branch_name||'').slice(0,22)}</td><td class="mono">${(o.salesperson||'').replace(/^.*\\/,'')}</td>
+      <td class="num">${money(o.total)}</td><td class="num">${money(o.in_stock)}</td>
+      <td class="num">${money(o.needs_po)}</td><td class="num">${money(o.on_po)}</td>
+      <td class="mono">${o.earliest||'—'}</td><td class="num ${o.days_late>5?'red':o.days_late>0?'amber':''}">${o.days_late||''}</td>
+      <td><select onchange="setRev('${o.document_no}','ship_this_month',this.value)">
+        <option value=""${stm===''?' selected':''}>—</option>
+        <option value="Yes"${stm==='Yes'?' selected':''}>Yes</option>
+        <option value="No"${stm==='No'?' selected':''}>No</option></select></td>
+      <td><input type="text" value="${rv.reviewed_ship_date||''}" placeholder="YYYY-MM-DD"
+        onchange="setRev('${o.document_no}','reviewed_ship_date',this.value)"></td>
+      <td><input type="text" value="${(rv.if_not_shipping||'').replace(/"/g,'&quot;')}"
+        onchange="setRev('${o.document_no}','if_not_shipping',this.value)"></td>
+      <td><input type="text" value="${(rv.carryover_notes||'').replace(/"/g,'&quot;')}"
+        onchange="setRev('${o.document_no}','carryover_notes',this.value)"></td>
+      <td><input type="text" value="${rv.owner_initials||''}" style="width:50px"
+        onchange="setRev('${o.document_no}','owner_initials',this.value)"></td>
+      <td class="mono" style="font-size:10px;color:var(--text3)">${(rv.reviewed_by||'').replace(/^.*\\/,'')}</td>
+    </tr>`;}).join('');
+}
+
+async function setRev(doc,field,value){
+  const o=ORDERS.find(x=>x.document_no===doc)||{};
+  const rv=REVIEWS[doc]||{document_no:doc};
+  const old=rv[field]||'';
+  rv[field]=value; rv.reviewed_by=WHO; rv.source_system='INDELCO_BC';
+  REVIEWS[doc]=rv;
+  const payload={document_no:doc,source_system:rv.source_system,ship_this_month:rv.ship_this_month||null,
+    material_ordered:rv.material_ordered||null,if_not_shipping:rv.if_not_shipping||null,
+    carryover_notes:rv.carryover_notes||null,reviewed_ship_date:rv.reviewed_ship_date||null,
+    review_date:new Date().toISOString().slice(0,10),owner_initials:rv.owner_initials||null,
+    reviewed_by:WHO,updated_by:WHO};
+  await sbUp('bl_order_review',payload,'document_no');
+  await sbUp('bl_audit',{document_no:doc,field,old_value:String(old),new_value:String(value),changed_by:WHO});
+  if(field==='ship_this_month'){renderProjection();$('revcount')&&renderReview();}
+}
+
+// ── Projection ───────────────────────────────────────────────────────
+function computeProjection(){
+  const now=new Date(),mStart=new Date(now.getFullYear(),now.getMonth(),1),
+    mEnd=new Date(now.getFullYear(),now.getMonth()+1,0);
+  const elapsedWD=workingDays(mStart,now), remWD=Math.max(0,workingDays(new Date(now.getTime()+864e5),mEnd));
+  return BUDGET_GROUPS.map(g=>{
+    const p=PACING[g]||{budget:0,forecast:0,sni:0};
+    const confirmed=ORDERS.filter(o=>o.budget_group===g&&(REVIEWS[o.document_no]||{}).ship_this_month==='Yes')
+      .reduce((s,o)=>s+o.total,0);
+    const invMTD=DAILY.filter(d=>d.budget_group===g&&d.invoice_date>=mStart.toISOString().slice(0,10))
+      .reduce((s,d)=>s+num(d.amount),0);
+    const pace=elapsedWD>0?invMTD/elapsedWD:0;
+    const runRate=pace*remWD;
+    const proj=invMTD+(p.sni||0)+confirmed+runRate;
+    const reqBudget=remWD>0?Math.max(0,((p.budget||0)-invMTD-(p.sni||0)-confirmed)/remWD):0;
+    return {g,budget:p.budget||0,forecast:p.forecast||0,invMTD,sni:p.sni||0,confirmed,pace,runRate,
+      proj,gapBudget:proj-(p.budget||0),gapForecast:proj-(p.forecast||0),reqBudget,elapsedWD,remWD};
+  });
+}
+function renderProjection(){
+  const rows=computeProjection();
+  const tot=rows.reduce((a,r)=>{['budget','forecast','invMTD','sni','confirmed','runRate','proj'].forEach(k=>a[k]=(a[k]||0)+r[k]);return a;},{});
+  tot.gapBudget=tot.proj-tot.budget; tot.gapForecast=tot.proj-tot.forecast;
+  $('projKpis').innerHTML=`
+    <div class="kpi"><div class="l">Projected Month-End</div><div class="v">${money(tot.proj)}</div></div>
+    <div class="kpi"><div class="l">Budget</div><div class="v">${money(tot.budget)}</div></div>
+    <div class="kpi"><div class="l">Gap to Budget</div><div class="v ${tot.gapBudget>=0?'green':'red'}">${money(tot.gapBudget)}</div></div>
+    <div class="kpi"><div class="l">Confirmed Backlog</div><div class="v">${money(tot.confirmed)}</div></div>
+    <div class="kpi"><div class="l">Invoiced MTD</div><div class="v">${money(tot.invMTD)}</div></div>`;
+  const b=$('projBody');
+  b.innerHTML=rows.map(r=>`<tr>
+    <td>${r.g}</td><td class="num">${money(r.budget)}</td><td class="num">${money(r.forecast)}</td>
+    <td class="num">${money(r.invMTD)}</td><td class="num">${money(r.sni)}</td><td class="num">${money(r.confirmed)}</td>
+    <td class="num">${money(r.pace)}</td><td class="num">${money(r.runRate)}</td>
+    <td class="num" style="font-weight:600">${money(r.proj)}</td>
+    <td class="num ${r.gapBudget>=0?'green':'red'}">${money(r.gapBudget)}</td>
+    <td class="num ${r.gapForecast>=0?'green':'red'}">${money(r.gapForecast)}</td>
+    <td class="num">${money(r.reqBudget)}</td></tr>`).join('')+
+    `<tr style="font-weight:600;border-top:2px solid var(--border2)">
+      <td>Total</td><td class="num">${money(tot.budget)}</td><td class="num">${money(tot.forecast)}</td>
+      <td class="num">${money(tot.invMTD)}</td><td class="num">${money(tot.sni)}</td><td class="num">${money(tot.confirmed)}</td>
+      <td></td><td class="num">${money(tot.runRate)}</td><td class="num">${money(tot.proj)}</td>
+      <td class="num ${tot.gapBudget>=0?'green':'red'}">${money(tot.gapBudget)}</td>
+      <td class="num ${tot.gapForecast>=0?'green':'red'}">${money(tot.gapForecast)}</td><td></td></tr>`;
+}
+
+// ── Pacing inputs ────────────────────────────────────────────────────
+function buildPacingEditor(){
+  $('pacingBody').innerHTML=BUDGET_GROUPS.map(g=>{const p=PACING[g]||{};
+    return `<tr><td>${g}</td>
+    <td class="num"><input type="text" id="pb_${g}" value="${p.budget||''}" style="text-align:right"></td>
+    <td class="num"><input type="text" id="pf_${g}" value="${p.forecast||''}" style="text-align:right"></td>
+    <td class="num"><input type="text" id="ps_${g}" value="${p.sni||''}" style="text-align:right"></td></tr>`;}).join('');
+}
+async function savePacing(){
+  const rows=BUDGET_GROUPS.map(g=>({period:PERIOD,budget_group:g,
+    monthly_budget:num($('pb_'+g).value),monthly_forecast:num($('pf_'+g).value),
+    current_sni:num($('ps_'+g).value),updated_by:WHO}));
+  const ok=await sbUp('bl_pacing_input',rows,'period,budget_group');
+  $('pacingMsg').textContent=ok?'✓ saved':'save failed (offline?)';
+  await loadPacing(); renderProjection();
+}
+async function saveDaily(){
+  const d=clean($('diDate').value),g=$('diGroup').value,a=num($('diAmt').value);
+  if(!d||!g){$('diMsg').textContent='date + group required';return;}
+  const ok=await sbUp('bl_daily_invoiced',{invoice_date:d,budget_group:g,amount:a,updated_by:WHO},'invoice_date,budget_group');
+  $('diMsg').textContent=ok?'✓ saved':'save failed';
+  await loadPacing(); renderProjection();
+}
+
+// ── views ────────────────────────────────────────────────────────────
+function switchView(v,el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');
+  ['review','projection','inputs'].forEach(x=>$('view-'+x).classList.toggle('hidden',x!==v));
+  $('loadbar').classList.toggle('hidden',v!=='review');
+  if(v==='projection')renderProjection();
+  if(v==='inputs')buildPacingEditor();
+}
+</script>
+</body>
+</html>
