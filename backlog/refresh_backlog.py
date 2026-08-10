@@ -11,11 +11,16 @@ lines, and upserts them into Supabase bl_source_lines. The app reads from
 there. Purchase Lines is optional (only adds On-PO vs Needs-PO).
 
 Setup on a domain machine:
-  pip install requests requests-negotiate-sspi
+  pip install requests requests-negotiate-sspi truststore
   copy refresh_config.example.json -> refresh_config.local.json  and paste
   your Sales Lines OData URL into it.
   python refresh_backlog.py --probe     # dump fields, no writes
   python refresh_backlog.py             # full refresh
+
+truststore makes Python trust the Windows certificate store. On a corporate
+network that does SSL inspection, HTTPS to Supabase is re-signed by a company
+root CA that Python's bundled certifi doesn't know — but Windows does. Without
+it you get "CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate".
 """
 
 import sys, json, time, argparse
@@ -24,7 +29,20 @@ from pathlib import Path
 try:
     import requests
 except ImportError:
-    print("Missing dependency. Run:  pip install requests requests-negotiate-sspi"); sys.exit(1)
+    print("Missing dependency. Run:  pip install requests requests-negotiate-sspi truststore"); sys.exit(1)
+
+
+def enable_os_trust():
+    """Route TLS verification through the OS (Windows) trust store so a
+    corporate SSL-inspection root CA is trusted. BC is plain HTTP so this
+    only matters for the HTTPS push to Supabase. Best-effort: if truststore
+    isn't installed we carry on and let the SSL error (with a hint) surface."""
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+        return True
+    except Exception:
+        return False
 
 HERE = Path(__file__).parent
 CONFIG = HERE / 'refresh_config.local.json'
@@ -300,14 +318,20 @@ def push_supabase(cfg, src, rows):
     h = {'apikey': sb['key'], 'Authorization': 'Bearer ' + sb['key'], 'Content-Type': 'application/json'}
     base = f"{sb['url']}/rest/v1/bl_source_lines"
     import urllib.parse
-    d = requests.delete(f"{base}?source_system=eq.{urllib.parse.quote(src)}",
-                        headers={**h, 'Prefer': 'return=minimal'}, timeout=60)
-    print(f"  cleared old rows: HTTP {d.status_code}")
-    for i in range(0, len(rows), 500):
-        r = requests.post(base, headers={**h, 'Prefer': 'return=minimal'},
-                          data=json.dumps(rows[i:i+500]), timeout=120)
-        if r.status_code >= 300:
-            sys.exit(f"  insert failed at {i}: {r.status_code} {r.text[:300]}")
+    try:
+        d = requests.delete(f"{base}?source_system=eq.{urllib.parse.quote(src)}",
+                            headers={**h, 'Prefer': 'return=minimal'}, timeout=60)
+        print(f"  cleared old rows: HTTP {d.status_code}")
+        for i in range(0, len(rows), 500):
+            r = requests.post(base, headers={**h, 'Prefer': 'return=minimal'},
+                              data=json.dumps(rows[i:i+500]), timeout=120)
+            if r.status_code >= 300:
+                sys.exit(f"  insert failed at {i}: {r.status_code} {r.text[:300]}")
+    except requests.exceptions.SSLError:
+        sys.exit(
+            "  SSL verify to Supabase failed (corporate SSL inspection).\n"
+            "  Fix:  pip install truststore   then re-run. It makes Python\n"
+            "  trust the Windows certificate store, which has your company CA.")
     print(f"  pushed {len(rows):,} rows to bl_source_lines")
 
 
@@ -315,6 +339,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--probe', action='store_true', help='dump entity fields, no writes')
     args = ap.parse_args()
+    if not enable_os_trust():
+        print("  (truststore not installed — if the Supabase push fails on SSL,"
+              " run: pip install truststore)")
     cfg = load_config()
     probe(cfg) if args.probe else (refresh(cfg), print("Done."))
 
