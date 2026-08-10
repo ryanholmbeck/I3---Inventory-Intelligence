@@ -18,7 +18,7 @@ Setup on a domain machine:
   python refresh_backlog.py             # full refresh
 """
 
-import sys, json, argparse
+import sys, json, time, argparse
 from pathlib import Path
 
 try:
@@ -87,14 +87,45 @@ def get_session(cfg):
     return s
 
 
+def _get(s, url, params, timeout=300, tries=4, fatal=True):
+    """GET with retry/backoff — BC pages can be slow to render server-side.
+    Returns the response, or None on a non-200 when fatal=False."""
+    for attempt in range(tries):
+        try:
+            r = s.get(url, params=params, headers={'Accept': 'application/json'},
+                      timeout=timeout)
+            if r.status_code != 200:
+                if not fatal:
+                    return r
+                sys.exit(f"  HTTP {r.status_code} on {url}\n  {r.text[:300]}")
+            return r
+        except requests.exceptions.RequestException as e:
+            if attempt == tries - 1:
+                raise
+            wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
+            print(f"  ...retry {attempt+1}/{tries-1} after {wait}s ({type(e).__name__})")
+            time.sleep(wait)
+
+
+def usable_params(s, url, params):
+    """Probe with $top=1 to confirm the server accepts these $select/$filter
+    options. If it 400s (a web service that won't filter/select those fields),
+    drop the options so the pull still works — just wider/longer."""
+    probe_params = {**params, '$top': '1'}
+    r = _get(s, url, probe_params, timeout=120, tries=2, fatal=False)
+    if r is not None and r.status_code == 200:
+        return params
+    code = r.status_code if r is not None else '???'
+    print(f"  (server rejected $select/$filter: HTTP {code} — pulling full rows)")
+    return None
+
+
 def fetch_all(s, url, params=None):
-    """Walk @odata.nextLink paging from a full entity URL."""
+    """Walk @odata.nextLink paging from a full entity URL. $select/$filter
+    (in params) keep the first-page payload small; nextLink carries them on."""
     first = True
     while url:
-        r = s.get(url, params=params if first else None,
-                  headers={'Accept': 'application/json'}, timeout=180)
-        if r.status_code != 200:
-            sys.exit(f"  HTTP {r.status_code} on {url}\n  {r.text[:300]}")
+        r = _get(s, url, params if first else None)
         body = r.json()
         for row in body.get('value', []):
             yield row
@@ -148,10 +179,15 @@ def refresh(cfg):
     spf = cfg.get('salesperson_field', HDR_MAP['salesperson'])
 
     # Sales Header (Orders) -> document_no -> {salesperson, order_date, customer_name}
+    # $select only the fields we use: the SalesOrder entity has ~170 columns,
+    # and pulling all of them makes the first page big enough to time out.
+    hdr_sel = ','.join(dict.fromkeys(
+        [HDR_DOCNO, spf, HDR_MAP['order_date'], HDR_MAP['customer_name']]))
     headers = {}
     sourl = ents.get('sales_orders')
     if is_url(sourl):
-        for so in fetch_all(s, sourl):
+        hdr_params = usable_params(s, sourl, {'$select': hdr_sel})
+        for so in fetch_all(s, sourl, hdr_params):
             headers[str(so.get(HDR_DOCNO, '')).strip()] = {
                 'salesperson': so.get(spf),
                 'order_date': so.get(HDR_MAP['order_date']),
@@ -172,8 +208,15 @@ def refresh(cfg):
         except Exception as e:
             print(f"  (purchase lines skipped: {e})")
 
+    # Sales Lines — $select the mapped fields and $filter server-side to open
+    # order lines only. This cuts both width (fewer columns) and length (skips
+    # quotes and fully-shipped lines) so the pull returns fast.
+    line_sel = ','.join(dict.fromkeys(LINE_MAP.values()))
+    line_flt = "Document_Type eq 'Order' and Outstanding_Quantity gt 0"
+    line_params = usable_params(s, ents['sales_lines'],
+                                {'$select': line_sel, '$filter': line_flt})
     rows = []
-    for sl in fetch_all(s, ents['sales_lines']):
+    for sl in fetch_all(s, ents['sales_lines'], line_params):
         if str(g(sl, 'document_type') or '').strip() != 'Order':
             continue   # orders only (feed also has Quotes)
         oq = numf(g(sl, 'outstanding_quantity'))
