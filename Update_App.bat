@@ -25,6 +25,12 @@ call :get "build_db.py"
 call :get "server.py"
 call :get "Indelco_SSMS_Connector.py"
 call :get "bc_pull.py"
+call :get "Run_Backlog_Refresh.bat"
+:: backlog toolkit (subfolder). config.local.json is yours + never downloaded.
+if not exist backlog mkdir backlog
+call :get "backlog/refresh_backlog.py"
+call :get "backlog/refresh_config.example.json"
+call :get "backlog/schema.sql"
 
 :: Self-update: download the latest updater to .new (can't overwrite a
 :: running .bat in place; we swap it in after this script exits, below).
