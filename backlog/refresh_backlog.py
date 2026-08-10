@@ -29,27 +29,31 @@ except ImportError:
 HERE = Path(__file__).parent
 CONFIG = HERE / 'refresh_config.local.json'
 
-# canonical field -> BC OData field name (adjust after --probe)
-FIELD_MAP = {
+# Sales LINE fields (confirmed from the live probe)
+LINE_MAP = {
+    'document_type':        'Document_Type',
     'document_no':          'Document_No',
     'line_no':              'Line_No',
     'customer_no':          'Sell_to_Customer_No',
     'location_code':        'Location_Code',
-    'branch_name':          'Branch_Name',
-    'salesperson':          'Salesperson',
-    'buyer_name':           'Buyer_Name',
-    'vendor_no':            'Vendor_No',
-    'vendor_name':          'Vendor_Name',
     'item_no':              'No',
     'description':          'Description',
     'quantity':             'Quantity',
     'outstanding_quantity': 'Outstanding_Quantity',
     'uom':                  'Unit_of_Measure_Code',
-    'outstanding_amount':   'Outstanding_Amount',
+    'line_amount':          'Line_Amount',        # full line $; outstanding $ derived
     'shipment_date':        'Shipment_Date',
-    'order_date':           'Order_Date',
-    'qty_on_hand':          'Quantity_on_Hand',
-    'is_drop_ship':         'Is_DS',
+    'qty_on_hand':          'Inventory',          # QoH by item/location
+    'is_drop_ship':         'Drop_Shipment',
+}
+# Sales HEADER (Sales Orders) fields — joined on document no to get the
+# salesperson (DOMAIN\user), order date, customer name. Confirm/adjust the
+# salesperson field after probing the Sales Orders webservice.
+HDR_DOCNO = 'No'
+HDR_MAP = {
+    'salesperson':    'Assigned_User_ID',   # DOMAIN\user; may be 'Created_By' — confirm via probe
+    'order_date':     'Order_Date',
+    'customer_name':  'Sell_to_Customer_Name',
 }
 
 
@@ -95,10 +99,15 @@ def fetch_all(s, url, params=None):
         url = body.get('@odata.nextLink'); first = False
 
 
+def is_url(u):
+    return bool(u) and str(u).lower().startswith('http')
+
+
 def probe(cfg):
     s = get_session(cfg)
     for name, url in cfg['entities'].items():
-        if not url or url.startswith('PASTE'):
+        if not is_url(url):
+            print(f"\n=== {name} === (skipped — no URL configured)")
             continue
         print(f"\n=== {name} ===\n{url}")
         rows = list(fetch_all(s, url, {'$top': '1'}))
@@ -109,7 +118,7 @@ def probe(cfg):
 
 
 def g(row, canon):
-    return row.get(FIELD_MAP.get(canon, canon))
+    return row.get(LINE_MAP.get(canon, canon))
 
 
 def numf(v):
@@ -134,13 +143,27 @@ def refresh(cfg):
     s = get_session(cfg)
     src = cfg.get('source_system', 'INDELCO_BC')
     ents = cfg['entities']
+    spf = cfg.get('salesperson_field', HDR_MAP['salesperson'])
 
-    # optional: open purchase lines -> which (item, location) are on a PO
+    # Sales Header (Orders) -> document_no -> {salesperson, order_date, customer_name}
+    headers = {}
+    sourl = ents.get('sales_orders')
+    if is_url(sourl):
+        for so in fetch_all(s, sourl):
+            headers[str(so.get(HDR_DOCNO, '')).strip()] = {
+                'salesperson': so.get(spf),
+                'order_date': so.get(HDR_MAP['order_date']),
+                'customer_name': so.get(HDR_MAP['customer_name']),
+            }
+        print(f"  sales order headers: {len(headers):,}")
+    else:
+        print("  (no sales_orders URL — salesperson/order date will be blank)")
+
+    # open purchase lines -> which (item, location) are on a PO
     on_po = set()
-    plurl = ents.get('purchase_lines')
-    if plurl and not plurl.startswith('PASTE'):
+    if is_url(ents.get('purchase_lines')):
         try:
-            for pl in fetch_all(s, plurl):
+            for pl in fetch_all(s, ents['purchase_lines']):
                 if numf(pl.get('Outstanding_Quantity')) > 0:
                     on_po.add((str(pl.get('No', '')).strip(), str(pl.get('Location_Code', '')).strip()))
             print(f"  open PO item/locations: {len(on_po):,}")
@@ -149,30 +172,36 @@ def refresh(cfg):
 
     rows = []
     for sl in fetch_all(s, ents['sales_lines']):
-        if numf(g(sl, 'outstanding_quantity')) <= 0:
-            continue   # open lines only (robust filter in Python)
+        if str(g(sl, 'document_type') or '').strip() != 'Order':
+            continue   # orders only (feed also has Quotes)
+        oq = numf(g(sl, 'outstanding_quantity'))
+        if oq <= 0:
+            continue
         item = str(g(sl, 'item_no') or '').strip()
         loc = str(g(sl, 'location_code') or '').strip()
-        sd = g(sl, 'shipment_date'); od = g(sl, 'order_date')
+        doc = str(g(sl, 'document_no') or '').strip()
+        qty = numf(g(sl, 'quantity'))
+        line_amt = numf(g(sl, 'line_amount'))
+        out_amt = line_amt * (oq / qty) if qty else line_amt   # open $ portion
+        sd = g(sl, 'shipment_date')
+        hdr = headers.get(doc, {})
+        od = hdr.get('order_date')
         rows.append({
-            'source_system': src,
-            'document_no': str(g(sl, 'document_no') or '').strip(),
+            'source_system': src, 'document_no': doc,
             'line_no': int(numf(g(sl, 'line_no'))),
             'customer_no': g(sl, 'customer_no'), 'location_code': loc,
-            'branch_name': g(sl, 'branch_name'), 'salesperson': g(sl, 'salesperson'),
-            'buyer_name': g(sl, 'buyer_name'),
-            'vendor_no': g(sl, 'vendor_no'), 'vendor_name': g(sl, 'vendor_name'),
+            'branch_name': None, 'salesperson': hdr.get('salesperson'),
+            'buyer_name': None, 'vendor_no': None, 'vendor_name': None,
             'item_no': item, 'description': g(sl, 'description'),
-            'quantity': numf(g(sl, 'quantity')),
-            'outstanding_quantity': numf(g(sl, 'outstanding_quantity')),
-            'uom': g(sl, 'uom'), 'outstanding_amount': numf(g(sl, 'outstanding_amount')),
+            'quantity': qty, 'outstanding_quantity': oq,
+            'uom': g(sl, 'uom'), 'outstanding_amount': round(out_amt, 2),
             'shipment_date': str(sd)[:10] if sd else None,
             'order_date': str(od)[:10] if od else None,
             'qty_on_hand': numf(g(sl, 'qty_on_hand')),
-            'status': classify(g(sl, 'qty_on_hand'), g(sl, 'outstanding_quantity'), (item, loc) in on_po),
+            'status': classify(g(sl, 'qty_on_hand'), oq, (item, loc) in on_po),
             'is_drop_ship': bool(g(sl, 'is_drop_ship')),
         })
-    print(f"  open sales lines: {len(rows):,}")
+    print(f"  open order lines: {len(rows):,}")
     push_supabase(cfg, src, rows)
 
 

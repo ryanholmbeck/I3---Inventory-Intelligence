@@ -5,8 +5,12 @@
 
   "entities": {
     "sales_lines":    "PASTE YOUR SALES LINES ODATA URL HERE",
-    "purchase_lines": "(optional) PASTE PURCHASE LINES ODATA URL, or leave as-is to skip"
+    "sales_orders":   "PASTE YOUR SALES ORDERS ODATA URL HERE (needed for salesperson)",
+    "purchase_lines": "leave as-is to skip (adds On-PO vs Needs-PO later)"
   },
+
+  "_salesperson_field": "Which Sales Orders field holds the DOMAIN\\user salesperson. Default 'Assigned_User_ID'. If the probe shows the reviewer under a different field (e.g. 'Created_By'), set salesperson_field to that.",
+  "salesperson_field": "Assigned_User_ID",
 
   "supabase": {
     "url": "https://kqzicdncxcdgrtlykxjc.supabase.co",
