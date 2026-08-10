@@ -132,6 +132,45 @@ def fetch_all(s, url, params=None):
         url = body.get('@odata.nextLink'); first = False
 
 
+def _window(s, url, base_params, skip, count, skipped):
+    """Read [skip, skip+count) as one page. If the API page refuses to
+    serialize it (BC throws Application_FieldValidationException on certain
+    records regardless of status), bisect down to isolate and skip just the
+    poison row(s) instead of losing the whole page. Returns (rows, at_end)
+    where at_end is True only when a successful read returned fewer rows than
+    requested — i.e. we've reached the end of the data (NOT merely short
+    because poison rows were dropped, which must not stop paging)."""
+    params = {**base_params, '$top': str(count), '$skip': str(skip)}
+    r = _get(s, url, params, timeout=300, tries=3, fatal=False)
+    if r is not None and r.status_code == 200:
+        rows = r.json().get('value', [])
+        return rows, len(rows) < count
+    if count <= 1:
+        skipped.append(skip)   # one unreadable record — drop it, keep going
+        return [], False       # a 400 here means the record exists; not the end
+    half = count // 2
+    lrows, _ = _window(s, url, base_params, skip, half, skipped)
+    rrows, at_end = _window(s, url, base_params, skip + half, count - half, skipped)
+    return lrows + rrows, at_end   # only the tail half decides end-of-data
+
+
+def fetch_resilient(s, url, base_params, page=2000):
+    """Key-ordered $top/$skip paging that survives poison records. Used for
+    BC API pages (like SalesOrder) that validate on read; a plain nextLink
+    walk dies on the first record the page won't serialize."""
+    skip, skipped = 0, []
+    while True:
+        rows, at_end = _window(s, url, base_params, skip, page, skipped)
+        for row in rows:
+            yield row
+        if at_end:
+            break
+        skip += page
+    if skipped:
+        print(f"  (skipped {len(skipped)} unreadable order header(s) the API "
+              f"page refused to serialize)")
+
+
 def is_url(u):
     return bool(u) and str(u).lower().startswith('http')
 
@@ -178,20 +217,26 @@ def refresh(cfg):
     ents = cfg['entities']
     spf = cfg.get('salesperson_field', HDR_MAP['salesperson'])
 
-    # Sales Header (Orders) -> document_no -> {salesperson, order_date, customer_name}
-    # $select only the fields we use: the SalesOrder entity has ~170 columns,
-    # and pulling all of them makes the first page big enough to time out.
-    hdr_sel = ','.join(dict.fromkeys(
-        [HDR_DOCNO, spf, HDR_MAP['order_date'], HDR_MAP['customer_name']]))
+    # Sales Header (Orders) -> document_no -> {salesperson, order_date}.
+    # We only need the fields the Sales Line lacks: salesperson (DOMAIN\user
+    # via Created_By) and order date. $select trims the ~170-column entity so
+    # the pull is small; fetch_resilient reads status-agnostically and skips
+    # any single record the API page refuses to serialize (BC throws a
+    # FieldValidationException on certain orders regardless of status).
+    hdr_sel = ','.join(dict.fromkeys([HDR_DOCNO, spf, HDR_MAP['order_date']]))
     headers = {}
     sourl = ents.get('sales_orders')
     if is_url(sourl):
-        hdr_params = usable_params(s, sourl, {'$select': hdr_sel})
-        for so in fetch_all(s, sourl, hdr_params):
+        # key-order for stable $skip paging; drop $select/$orderby if the
+        # server won't accept them, but keep the pull working either way.
+        hdr_params = usable_params(s, sourl, {'$select': hdr_sel, '$orderby': HDR_DOCNO})
+        if hdr_params is None:
+            hdr_params = {'$orderby': HDR_DOCNO} if usable_params(
+                s, sourl, {'$orderby': HDR_DOCNO}) else {}
+        for so in fetch_resilient(s, sourl, hdr_params):
             headers[str(so.get(HDR_DOCNO, '')).strip()] = {
                 'salesperson': so.get(spf),
                 'order_date': so.get(HDR_MAP['order_date']),
-                'customer_name': so.get(HDR_MAP['customer_name']),
             }
         print(f"  sales order headers: {len(headers):,}")
     else:
