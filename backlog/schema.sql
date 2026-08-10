@@ -175,3 +175,37 @@ create table if not exists bl_mtd_invoiced (
 alter table bl_mtd_invoiced enable row level security;
 drop policy if exists anon_all on bl_mtd_invoiced;
 create policy anon_all on bl_mtd_invoiced for all to anon using (true) with check (true);
+
+-- ── bl_source_lines — order-line data pushed by refresh_backlog.py ───
+-- The direct-from-BC replacement for the CSV drop. The refresh script
+-- pulls the 4 reports, enriches, and upserts open order lines here; the
+-- app reads order data from this table (CSV drop stays as a fallback).
+create table if not exists bl_source_lines (
+  source_system        text not null default 'INDELCO_BC',
+  document_no          text not null,
+  line_no              integer not null,
+  customer_no          text,
+  location_code        text,
+  branch_name          text,
+  salesperson          text,
+  buyer_name           text,
+  vendor_no            text,
+  vendor_name          text,
+  item_no              text,
+  description          text,
+  quantity             double precision,
+  outstanding_quantity double precision,
+  uom                  text,
+  outstanding_amount   double precision,
+  shipment_date        date,
+  order_date           date,
+  qty_on_hand          double precision,
+  status               text,          -- In Stock; Ship / On PO / Needs PO / None
+  is_drop_ship         boolean,
+  refreshed_at         timestamptz not null default now(),
+  primary key (source_system, document_no, line_no)
+);
+alter table bl_source_lines enable row level security;
+drop policy if exists anon_all on bl_source_lines;
+create policy anon_all on bl_source_lines for all to anon using (true) with check (true);
+create index if not exists idx_bl_sl_ship on bl_source_lines(shipment_date);

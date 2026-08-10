@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to refresh_config.local.json (gitignored) and fill in. The OAuth client_secret lives ONLY here on the machine that runs the refresh — never commit it.",
+
+  "bc": {
+    "odata_base": "https://YOUR-BC-HOST/BC/ODataV4",
+    "company": "Indelco Plastics",
+    "oauth_token_url": "https://login.microsoftonline.com/YOUR-TENANT-ID/oauth2/v2.0/token",
+    "scope": "https://api.businesscentral.dynamics.com/.default",
+    "client_id": "YOUR-CLIENT-ID",
+    "client_secret": "YOUR-CLIENT-SECRET",
+    "entities": {
+      "sales_lines":     "SalesLinesWS",
+      "sales_orders":    "SalesOrdersWS",
+      "purchase_lines":  "PurchaseLinesWS",
+      "purchase_orders": "PurchaseOrdersWS"
+    }
+  },
+
+  "supabase": {
+    "url": "https://kqzicdncxcdgrtlykxjc.supabase.co",
+    "key": "sb_publishable_ZhzxdZ2tkT6YGSV_8GYGlg_CdXgn7dZ"
+  },
+
+  "source_system": "INDELCO_BC"
+}

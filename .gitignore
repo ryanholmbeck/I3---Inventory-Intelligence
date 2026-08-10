@@ -27,3 +27,6 @@ Thumbs.db
 
 # Supabase local config (holds keys) — never commit
 supabase/config.local.js
+
+# Backlog refresh local config (OAuth secret) — never commit
+backlog/refresh_config.local.json
