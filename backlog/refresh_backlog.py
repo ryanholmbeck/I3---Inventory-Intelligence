@@ -35,11 +35,17 @@ except ImportError:
 def enable_os_trust():
     """Route TLS verification through the OS (Windows) trust store so a
     corporate SSL-inspection root CA is trusted. BC is plain HTTP so this
-    only matters for the HTTPS push to Supabase. Best-effort: if truststore
-    isn't installed we carry on and let the SSL error (with a hint) surface."""
+    only matters for the HTTPS push to Supabase. Best-effort: tries truststore
+    first, then pip-system-certs; if neither is installed we carry on and let
+    the SSL error (with a hint) surface."""
     try:
         import truststore
         truststore.inject_into_ssl()
+        return True
+    except Exception:
+        pass
+    try:
+        import pip_system_certs.wrapt_requests  # noqa: F401  (self-patches on import)
         return True
     except Exception:
         return False
