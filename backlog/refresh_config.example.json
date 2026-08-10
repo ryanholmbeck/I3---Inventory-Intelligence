@@ -1,19 +1,11 @@
 {
-  "_comment": "Copy to refresh_config.local.json (gitignored) and fill in. The OAuth client_secret lives ONLY here on the machine that runs the refresh — never commit it.",
+  "_comment": "Copy to refresh_config.local.json (gitignored). Windows auth uses your logged-in session — no OAuth, no secret. Just paste your Sales Lines OData URL. Purchase Lines is optional.",
 
-  "bc": {
-    "odata_base": "https://YOUR-BC-HOST/BC/ODataV4",
-    "company": "Indelco Plastics",
-    "oauth_token_url": "https://login.microsoftonline.com/YOUR-TENANT-ID/oauth2/v2.0/token",
-    "scope": "https://api.businesscentral.dynamics.com/.default",
-    "client_id": "YOUR-CLIENT-ID",
-    "client_secret": "YOUR-CLIENT-SECRET",
-    "entities": {
-      "sales_lines":     "SalesLinesWS",
-      "sales_orders":    "SalesOrdersWS",
-      "purchase_lines":  "PurchaseLinesWS",
-      "purchase_orders": "PurchaseOrdersWS"
-    }
+  "auth": "windows",
+
+  "entities": {
+    "sales_lines":    "PASTE YOUR SALES LINES ODATA URL HERE",
+    "purchase_lines": "(optional) PASTE PURCHASE LINES ODATA URL, or leave as-is to skip"
   },
 
   "supabase": {
