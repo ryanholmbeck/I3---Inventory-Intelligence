@@ -58,7 +58,7 @@ padding:3px 5px;border-radius:5px;font-size:11px;font-family:var(--font);width:1
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.1</span>
+  <span class="tag" id="ver">v0.2</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami">…</span>
@@ -233,6 +233,9 @@ function normalizeLine(row){
     qty_on_hand:num(col(row,'Quantity on Hand')),
     po_number:clean(col(row,'PO Number')),
     on_po:num(col(row,'On PO')),
+    // 'Shortage' is actually the line status label the workbook classifies by:
+    // 'In Stock; Ship' / 'On PO' / 'Needs PO' / 'None'. Bucket $ by this.
+    status:clean(col(row,'Shortage')),
     shipment_date:dstr(col(row,'Shipment Date')),
     is_ds:clean(col(row,'Is DS')),
     budget_group:(GMAP[loc]&&GMAP[loc].group)||'',
@@ -246,10 +249,11 @@ function summarize(lines){
       salesperson:l.salesperson,budget_group:l.budget_group,total:0,in_stock:0,needs_po:0,on_po:0,
       earliest:'',lines:0};m[l.document_no]=o;}
     o.total+=l.outstanding_amount; o.lines++;
-    // line classification
-    if(l.po_number||l.on_po>0)o.on_po+=l.outstanding_amount;
-    else if(l.qty_on_hand>=l.outstanding_qty)o.in_stock+=l.outstanding_amount;
-    else o.needs_po+=l.outstanding_amount;
+    // classify by the workbook's line-status column (matches Order_Review)
+    const st=(l.status||'').toLowerCase();
+    if(st.includes('in stock'))o.in_stock+=l.outstanding_amount;
+    else if(st.includes('on po'))o.on_po+=l.outstanding_amount;
+    else o.needs_po+=l.outstanding_amount; // 'Needs PO' / 'None' (0 amt)
     if(l.shipment_date&&(!o.earliest||l.shipment_date<o.earliest))o.earliest=l.shipment_date;
   }
   const today=new Date().toISOString().slice(0,10);
