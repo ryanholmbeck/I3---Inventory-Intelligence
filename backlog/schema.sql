@@ -144,3 +144,17 @@ insert into bl_budget_group_map (location_code, location_name, budget_group) val
   ('37','Ayer Sales - Syracuse','Ayer'),  ('40','Quality Stainless','QS')
 on conflict (location_code) do update set
   location_name = excluded.location_name, budget_group = excluded.budget_group;
+
+-- ── bl_admins (optional) — who may see Projection + Pacing Inputs ────
+-- Add rows to restrict those tabs. While EMPTY, everyone sees them
+-- (so nobody is locked out before you populate it). Username must match
+-- the workstation identity exactly, e.g. 'FLUIDFLOW\RYANHOLMBECK'.
+create table if not exists bl_admins (
+  username text primary key,
+  note     text
+);
+alter table bl_admins enable row level security;
+drop policy if exists anon_all on bl_admins;
+create policy anon_all on bl_admins for all to anon using (true) with check (true);
+-- Example (uncomment + edit):
+-- insert into bl_admins(username,note) values ('FLUIDFLOW\RYANHOLMBECK','owner') on conflict do nothing;

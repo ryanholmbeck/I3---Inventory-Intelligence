@@ -50,6 +50,8 @@ padding:3px 5px;border-radius:5px;font-size:11px;font-family:var(--font);width:1
 .kpi .l{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--text3)}
 .kpi .v{font-size:20px;font-weight:600;font-family:var(--mono);margin-top:4px}
 .green{color:var(--green)}.amber{color:var(--amber)}.red{color:var(--red)}
+tr.late td{background:rgba(224,82,82,.10)}
+tr.late:hover td{background:rgba(224,82,82,.16)}
 .card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px;margin-bottom:14px}
 .card h3{font-size:13px;margin-bottom:10px}
 .hidden{display:none}
@@ -58,7 +60,7 @@ padding:3px 5px;border-radius:5px;font-size:11px;font-family:var(--font);width:1
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.2</span>
+  <span class="tag" id="ver">v0.3</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami">…</span>
@@ -86,22 +88,29 @@ padding:3px 5px;border-radius:5px;font-size:11px;font-family:var(--font);width:1
       <label>Salesperson <select id="fSales"><option value="">All</option></select></label>
       <label>Budget Group <select id="fGroup"><option value="">All</option></select></label>
       <label>Branch <select id="fBranch"><option value="">All</option></select></label>
+      <label>Ship window <select id="fWindow">
+        <option value="review" selected>Past due + this month +7d</option>
+        <option value="past">Past due only</option>
+        <option value="week">This week</option>
+        <option value="month">This month</option>
+        <option value="all">All</option></select></label>
       <label>Status <select id="fStatus">
         <option value="">All</option><option value="new">Not Reviewed</option>
         <option value="yes">Ship This Month</option><option value="no">Not Shipping</option></select></label>
-      <input type="text" id="fSearch" placeholder="Search order / customer…" style="width:200px">
-      <label><input type="checkbox" id="fMine"> Only mine</label>
+      <input type="text" id="fSearch" placeholder="Search order / customer…" style="width:180px">
+      <label><input type="checkbox" id="fMine" checked> Only mine</label>
       <span class="spacer"></span>
       <span class="tag" id="revcount"></span>
+      <button class="btn ghost" onclick="exportReview()">📄 Export CSV</button>
     </div>
     <div class="wrap"><table id="tblReview">
       <thead><tr>
         <th>Order</th><th>Customer</th><th>Branch</th><th>Salesperson</th>
         <th class="num">Total $</th><th class="num">In Stock $</th><th class="num">Needs PO $</th><th class="num">On PO $</th>
         <th>Earliest Ship</th><th class="num">Days Late</th>
-        <th>Ship This Mo</th><th>Reviewed Ship Date</th><th>If Not, Why</th><th>Notes</th><th>Owner</th><th>By</th>
+        <th>Ship This Mo</th><th>New Ship Date</th><th>Notes</th><th>By</th>
       </tr></thead>
-      <tbody id="revBody"><tr><td colspan="16" class="empty">Load the Source Sales Lines CSV to begin.</td></tr></tbody>
+      <tbody id="revBody"><tr><td colspan="14" class="empty">Load the Source Sales Lines CSV to begin.</td></tr></tbody>
     </table></div>
   </div>
 
@@ -128,6 +137,7 @@ padding:3px 5px;border-radius:5px;font-size:11px;font-family:var(--font);width:1
         <tbody id="pacingBody"></tbody>
       </table></div>
       <div style="margin-top:10px"><button class="btn" onclick="savePacing()">💾 Save Targets</button>
+        <button class="btn ghost" onclick="exportTargets()">📄 Export CSV</button>
         <span class="tag" id="pacingMsg"></span></div>
     </div>
     <div class="card">
@@ -137,6 +147,7 @@ padding:3px 5px;border-radius:5px;font-size:11px;font-family:var(--font);width:1
         <label>Budget Group <select id="diGroup"></select></label>
         <label>Amount <input type="text" id="diAmt" placeholder="0" style="width:120px"></label>
         <button class="btn" onclick="saveDaily()">Add / Update</button>
+        <button class="btn ghost" onclick="exportDaily()">📄 Export CSV</button>
         <span class="tag" id="diMsg"></span>
       </div>
     </div>
@@ -198,8 +209,9 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   ['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('over');}));
   ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('over');}));
   dz.addEventListener('drop',e=>{if(e.dataTransfer.files[0])loadCSV(e.dataTransfer.files[0]);});
-  ['fSales','fGroup','fBranch','fStatus','fMine'].forEach(id=>$(id).addEventListener('change',renderReview));
+  ['fSales','fGroup','fBranch','fStatus','fMine','fWindow'].forEach(id=>$(id).addEventListener('change',renderReview));
   $('fSearch').addEventListener('input',renderReview);
+  await applyAccessGate();
 })();
 
 async function loadReviews(){REVIEWS={};const r=await sbSel('bl_order_review','select=*');if(r)r.forEach(x=>REVIEWS[x.document_no]=x);}
@@ -272,28 +284,48 @@ function fill(sel,vals){const cur=sel.value;sel.innerHTML='<option value="">All<
   vals.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;sel.appendChild(o);});sel.value=cur;}
 
 // ── Review grid ──────────────────────────────────────────────────────
+const curMonth=()=>new Date().toISOString().slice(0,7);
+// Monthly blank-out: a Ship-This-Month decision only "counts" for the
+// month it was made in. In a new month, unreviewed until re-decided.
+const isCurrentReview=rv=>!!(rv&&rv.review_date&&String(rv.review_date).slice(0,7)===curMonth());
+const effStm=rv=>isCurrentReview(rv)?(rv.ship_this_month||''):'';
+function inWindow(o,win){
+  if(win==='all')return true;
+  const e=o.earliest; if(!e)return win==='month'||win==='review'?false:false;
+  const now=new Date(), today=now.toISOString().slice(0,10);
+  const mEnd=new Date(now.getFullYear(),now.getMonth()+1,0);
+  const mEndS=mEnd.toISOString().slice(0,10);
+  if(win==='past')return e<today;
+  if(win==='week')return e<=new Date(now.getTime()+(6-now.getDay())*864e5).toISOString().slice(0,10);
+  if(win==='month')return e<=mEndS;
+  // 'review' (default): everything past-due through 7 days past month-end
+  return e<=new Date(mEnd.getTime()+7*864e5).toISOString().slice(0,10);
+}
+let REVROWS=[];   // currently-visible rows (for export)
 function renderReview(){
   const fs=$('fSales').value,fg=$('fGroup').value,fb=$('fBranch').value,fst=$('fStatus').value,
-    q=$('fSearch').value.toLowerCase(),mine=$('fMine').checked;
+    win=$('fWindow').value,q=$('fSearch').value.toLowerCase(),mine=$('fMine').checked;
   let rows=ORDERS.filter(o=>{
     if(fs&&o.salesperson!==fs)return false;
     if(fg&&o.budget_group!==fg)return false;
     if(fb&&o.branch_name!==fb)return false;
     if(mine&&WHO&&o.salesperson.toUpperCase()!==WHO.toUpperCase())return false;
-    const rv=REVIEWS[o.document_no]||{};
-    if(fst==='new'&&(rv.ship_this_month))return false;
-    if(fst==='yes'&&rv.ship_this_month!=='Yes')return false;
-    if(fst==='no'&&rv.ship_this_month!=='No')return false;
+    if(!inWindow(o,win))return false;
+    const stm=effStm(REVIEWS[o.document_no]||{});
+    if(fst==='new'&&stm)return false;
+    if(fst==='yes'&&stm!=='Yes')return false;
+    if(fst==='no'&&stm!=='No')return false;
     if(q&&!(o.document_no.toLowerCase().includes(q)||(o.customer_no||'').toLowerCase().includes(q)))return false;
     return true;
   });
+  REVROWS=rows;
   $('revcount').textContent=`${rows.length.toLocaleString()} orders · ${money(rows.reduce((s,o)=>s+o.total,0))}`;
   const b=$('revBody');
-  if(!rows.length){b.innerHTML='<tr><td colspan="16" class="empty">No orders match.</td></tr>';return;}
+  if(!rows.length){b.innerHTML='<tr><td colspan="14" class="empty">No orders match.</td></tr>';return;}
   b.innerHTML=rows.slice(0,1000).map(o=>{
     const rv=REVIEWS[o.document_no]||{};
-    const stm=rv.ship_this_month||'';
-    return `<tr>
+    const stm=effStm(rv);
+    return `<tr class="${o.days_late>0?'late':''}">
       <td class="mono">${o.document_no}</td><td class="mono">${o.customer_no||''}</td>
       <td>${(o.branch_name||'').slice(0,22)}</td><td class="mono">${(o.salesperson||'').replace(/^.*\\/,'')}</td>
       <td class="num">${money(o.total)}</td><td class="num">${money(o.in_stock)}</td>
@@ -305,14 +337,31 @@ function renderReview(){
         <option value="No"${stm==='No'?' selected':''}>No</option></select></td>
       <td><input type="text" value="${rv.reviewed_ship_date||''}" placeholder="YYYY-MM-DD"
         onchange="setRev('${o.document_no}','reviewed_ship_date',this.value)"></td>
-      <td><input type="text" value="${(rv.if_not_shipping||'').replace(/"/g,'&quot;')}"
-        onchange="setRev('${o.document_no}','if_not_shipping',this.value)"></td>
       <td><input type="text" value="${(rv.carryover_notes||'').replace(/"/g,'&quot;')}"
         onchange="setRev('${o.document_no}','carryover_notes',this.value)"></td>
-      <td><input type="text" value="${rv.owner_initials||''}" style="width:50px"
-        onchange="setRev('${o.document_no}','owner_initials',this.value)"></td>
       <td class="mono" style="font-size:10px;color:var(--text3)">${(rv.reviewed_by||'').replace(/^.*\\/,'')}</td>
     </tr>`;}).join('');
+}
+
+// ── CSV export (clean, human-readable headers) ───────────────────────
+function toCSV(headers,rows){
+  const esc=v=>{const s=v==null?'':String(v);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
+  return [headers.join(',')].concat(rows.map(r=>r.map(esc).join(','))).join('\r\n');
+}
+function download(name,text){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([text],{type:'text/csv'}));
+  a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),200);
+}
+function exportReview(){
+  const H=['Order','Customer','Branch','Salesperson','Total $','In Stock $','Needs PO $','On PO $',
+    'Earliest Ship','Days Late','Ship This Month','New Ship Date','Notes','Reviewed By'];
+  const rows=REVROWS.map(o=>{const rv=REVIEWS[o.document_no]||{};
+    return [o.document_no,o.customer_no,o.branch_name,(o.salesperson||'').replace(/^.*\\/,''),
+      Math.round(o.total),Math.round(o.in_stock),Math.round(o.needs_po),Math.round(o.on_po),
+      o.earliest,o.days_late||0,effStm(rv),rv.reviewed_ship_date||'',rv.carryover_notes||'',
+      (rv.reviewed_by||'').replace(/^.*\\/,'')];});
+  download(`Backlog_Review_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
 }
 
 async function setRev(doc,field,value){
@@ -338,7 +387,7 @@ function computeProjection(){
   const elapsedWD=workingDays(mStart,now), remWD=Math.max(0,workingDays(new Date(now.getTime()+864e5),mEnd));
   return BUDGET_GROUPS.map(g=>{
     const p=PACING[g]||{budget:0,forecast:0,sni:0};
-    const confirmed=ORDERS.filter(o=>o.budget_group===g&&(REVIEWS[o.document_no]||{}).ship_this_month==='Yes')
+    const confirmed=ORDERS.filter(o=>o.budget_group===g&&effStm(REVIEWS[o.document_no]||{})==='Yes')
       .reduce((s,o)=>s+o.total,0);
     const invMTD=DAILY.filter(d=>d.budget_group===g&&d.invoice_date>=mStart.toISOString().slice(0,10))
       .reduce((s,d)=>s+num(d.amount),0);
@@ -399,6 +448,32 @@ async function saveDaily(){
   const ok=await sbUp('bl_daily_invoiced',{invoice_date:d,budget_group:g,amount:a,updated_by:WHO},'invoice_date,budget_group');
   $('diMsg').textContent=ok?'✓ saved':'save failed';
   await loadPacing(); renderProjection();
+}
+
+function exportTargets(){
+  const H=['Budget Group','Monthly Budget','Monthly Forecast','Current SNI','Period'];
+  const rows=BUDGET_GROUPS.map(g=>{const p=PACING[g]||{};
+    return [g,Math.round(p.budget||0),Math.round(p.forecast||0),Math.round(p.sni||0),PERIOD];});
+  download(`Monthly_Targets_${PERIOD}.csv`,toCSV(H,rows));
+}
+function exportDaily(){
+  const H=['Date','Budget Group','Invoiced Amount'];
+  const rows=DAILY.slice().sort((a,b)=>(a.invoice_date>b.invoice_date?1:-1))
+    .map(d=>[d.invoice_date,d.budget_group,Math.round(num(d.amount))]);
+  download(`Daily_Invoiced_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
+}
+
+// ── access gate: restrict Projection + Pacing tabs to admins ─────────
+// If bl_admins has rows and the workstation user isn't listed, hide those
+// two tabs. If the table is empty/absent, everyone sees them (open until
+// you populate it — so nobody gets locked out before setup).
+async function applyAccessGate(){
+  const admins=await sbSel('bl_admins','select=username');
+  if(!admins||!admins.length)return;            // open
+  const me=(WHO||'').toUpperCase();
+  const ok=admins.some(a=>String(a.username||'').toUpperCase()===me);
+  if(ok)return;
+  document.querySelectorAll('.tab[data-view="projection"],.tab[data-view="inputs"]').forEach(t=>t.classList.add('hidden'));
 }
 
 // ── views ────────────────────────────────────────────────────────────
