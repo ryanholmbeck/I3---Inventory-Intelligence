@@ -10,7 +10,7 @@
   },
 
   "_salesperson_field": "Which Sales Orders field holds the DOMAIN\\user salesperson. Default 'Assigned_User_ID'. If the probe shows the reviewer under a different field (e.g. 'Created_By'), set salesperson_field to that.",
-  "salesperson_field": "Assigned_User_ID",
+  "salesperson_field": "Created_By",
 
   "supabase": {
     "url": "https://kqzicdncxcdgrtlykxjc.supabase.co",

@@ -51,7 +51,9 @@ LINE_MAP = {
 # salesperson field after probing the Sales Orders webservice.
 HDR_DOCNO = 'No'
 HDR_MAP = {
-    'salesperson':    'Assigned_User_ID',   # DOMAIN\user; may be 'Created_By' — confirm via probe
+    # DOMAIN\user review owner. From the live probe, Created_By holds it
+    # (Assigned_User_ID was blank). Override via salesperson_field if needed.
+    'salesperson':    'Created_By',
     'order_date':     'Order_Date',
     'customer_name':  'Sell_to_Customer_Name',
 }
