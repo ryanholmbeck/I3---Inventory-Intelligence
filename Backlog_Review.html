@@ -60,7 +60,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.3</span>
+  <span class="tag" id="ver">v0.4</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami">…</span>
@@ -141,15 +141,18 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
         <span class="tag" id="pacingMsg"></span></div>
     </div>
     <div class="card">
-      <h3>Daily Invoiced Shipments — quick entry</h3>
+      <h3>MTD Invoiced Shipments — enter the running month-to-date $ (from Flow360)</h3>
       <div class="bar">
-        <label>Date <input type="text" id="diDate" placeholder="YYYY-MM-DD" style="width:120px"></label>
-        <label>Budget Group <select id="diGroup"></select></label>
-        <label>Amount <input type="text" id="diAmt" placeholder="0" style="width:120px"></label>
-        <button class="btn" onclick="saveDaily()">Add / Update</button>
-        <button class="btn ghost" onclick="exportDaily()">📄 Export CSV</button>
-        <span class="tag" id="diMsg"></span>
+        <label>As-of date <input type="text" id="mtdDate" placeholder="YYYY-MM-DD" style="width:120px"></label>
+        <span id="mtdInputs" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+        <button class="btn" onclick="saveMTD()">💾 Save MTD</button>
+        <button class="btn ghost" onclick="exportMTD()">📄 Export CSV</button>
+        <span class="tag" id="mtdMsg"></span>
       </div>
+      <div class="wrap" style="max-height:320px;margin-top:8px"><table id="tblMtd">
+        <thead><tr><th>Date</th><th>Group</th><th class="num">MTD $</th><th class="num">Δ Daily $</th><th class="num">Elapsed WD</th><th class="num">Pace/WD</th></tr></thead>
+        <tbody id="mtdBody"><tr><td colspan="6" class="empty">Enter MTD values to see derived daily + pace.</td></tr></tbody>
+      </table></div>
     </div>
   </div>
 
@@ -163,7 +166,7 @@ let ORDERS = [];              // summarized orders from CSV
 let REVIEWS = {};             // document_no -> review row (Supabase)
 let GMAP = {};                // location_code -> {name, group}
 let PACING = {};              // 'group' -> {budget,forecast,sni}
-let DAILY = [];               // {invoice_date, budget_group, amount}
+let MTD = [];                 // {invoice_date, budget_group, mtd_amount} cumulative
 const PERIOD = new Date().toISOString().slice(0,7);
 
 // ── Supabase (PostgREST over fetch) ──────────────────────────────────
@@ -199,10 +202,10 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   const gm=await sbSel('bl_budget_group_map','select=location_code,location_name,budget_group');
   if(gm)gm.forEach(r=>GMAP[clean(r.location_code)]={name:r.location_name,group:r.budget_group});
   await loadReviews(); await loadPacing();
-  // budget group dropdowns
-  BUDGET_GROUPS.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;$('fGroup').appendChild(o);
-    const o2=o.cloneNode(true);$('diGroup').appendChild(o2);});
-  buildPacingEditor();
+  // budget group filter dropdown
+  BUDGET_GROUPS.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;$('fGroup').appendChild(o);});
+  $('mtdDate').value=new Date().toISOString().slice(0,10);
+  buildPacingEditor(); buildMtdInputs(); renderMtdBreakdown();
   // file handlers
   $('file').addEventListener('change',e=>{if(e.target.files[0])loadCSV(e.target.files[0]);});
   const dz=$('drop');
@@ -211,6 +214,7 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   dz.addEventListener('drop',e=>{if(e.dataTransfer.files[0])loadCSV(e.dataTransfer.files[0]);});
   ['fSales','fGroup','fBranch','fStatus','fMine','fWindow'].forEach(id=>$(id).addEventListener('change',renderReview));
   $('fSearch').addEventListener('input',renderReview);
+  $('mtdDate').addEventListener('change',buildMtdInputs);
   await applyAccessGate();
 })();
 
@@ -218,7 +222,14 @@ async function loadReviews(){REVIEWS={};const r=await sbSel('bl_order_review','s
 async function loadPacing(){
   PACING={};const p=await sbSel('bl_pacing_input',`select=*&period=eq.${PERIOD}`);
   if(p)p.forEach(x=>PACING[x.budget_group]={budget:x.monthly_budget,forecast:x.monthly_forecast,sni:x.current_sni});
-  const d=await sbSel('bl_daily_invoiced','select=*');DAILY=d||[];
+  const m=await sbSel('bl_mtd_invoiced','select=*');MTD=m||[];
+}
+// latest MTD value for a group within the current month
+function latestMTD(g){
+  const mo=curMonth();
+  const rows=MTD.filter(r=>r.budget_group===g&&String(r.invoice_date).slice(0,7)===mo)
+    .sort((a,b)=>a.invoice_date<b.invoice_date?1:-1);
+  return rows.length?num(rows[0].mtd_amount):0;
 }
 
 // ── CSV load → normalize → summarize ─────────────────────────────────
@@ -389,8 +400,7 @@ function computeProjection(){
     const p=PACING[g]||{budget:0,forecast:0,sni:0};
     const confirmed=ORDERS.filter(o=>o.budget_group===g&&effStm(REVIEWS[o.document_no]||{})==='Yes')
       .reduce((s,o)=>s+o.total,0);
-    const invMTD=DAILY.filter(d=>d.budget_group===g&&d.invoice_date>=mStart.toISOString().slice(0,10))
-      .reduce((s,d)=>s+num(d.amount),0);
+    const invMTD=latestMTD(g);   // cumulative MTD invoiced (Flow360)
     const pace=elapsedWD>0?invMTD/elapsedWD:0;
     const runRate=pace*remWD;
     const proj=invMTD+(p.sni||0)+confirmed+runRate;
@@ -442,12 +452,44 @@ async function savePacing(){
   $('pacingMsg').textContent=ok?'✓ saved':'save failed (offline?)';
   await loadPacing(); renderProjection();
 }
-async function saveDaily(){
-  const d=clean($('diDate').value),g=$('diGroup').value,a=num($('diAmt').value);
-  if(!d||!g){$('diMsg').textContent='date + group required';return;}
-  const ok=await sbUp('bl_daily_invoiced',{invoice_date:d,budget_group:g,amount:a,updated_by:WHO},'invoice_date,budget_group');
-  $('diMsg').textContent=ok?'✓ saved':'save failed';
-  await loadPacing(); renderProjection();
+// ── MTD invoiced entry (Flow360 reports cumulative MTD, not daily) ───
+function buildMtdInputs(){
+  $('mtdInputs').innerHTML=BUDGET_GROUPS.map(g=>
+    `<label style="font-size:10px">${g}<br><input type="text" id="mtd_${g}" placeholder="0" style="width:90px;text-align:right"></label>`).join('');
+  // prefill from the MTD already stored for the chosen date
+  const d=clean($('mtdDate').value);
+  BUDGET_GROUPS.forEach(g=>{const row=MTD.find(r=>r.invoice_date===d&&r.budget_group===g);
+    if(row&&$('mtd_'+g))$('mtd_'+g).value=row.mtd_amount;});
+}
+async function saveMTD(){
+  const d=clean($('mtdDate').value);
+  if(!d){$('mtdMsg').textContent='date required';return;}
+  const rows=BUDGET_GROUPS.map(g=>({invoice_date:d,budget_group:g,mtd_amount:num($('mtd_'+g).value),updated_by:WHO}))
+    .filter(r=>r.mtd_amount>0||MTD.some(x=>x.invoice_date===d&&x.budget_group===r.budget_group));
+  if(!rows.length){$('mtdMsg').textContent='enter at least one value';return;}
+  const ok=await sbUp('bl_mtd_invoiced',rows,'invoice_date,budget_group');
+  $('mtdMsg').textContent=ok?'✓ saved':'save failed (offline?)';
+  await loadPacing(); renderMtdBreakdown(); renderProjection();
+}
+// derived daily = MTD[date] - MTD[prior date same month]; pace = MTD/elapsedWD
+function renderMtdBreakdown(){
+  const byDate={};
+  MTD.forEach(r=>{(byDate[r.invoice_date]=byDate[r.invoice_date]||{})[r.budget_group]=num(r.mtd_amount);});
+  const dates=Object.keys(byDate).sort();
+  const body=$('mtdBody'); if(!body)return;
+  const out=[];
+  for(let i=dates.length-1;i>=0&&out.length<48;i--){
+    const dt=dates[i];
+    const prior=dates.slice(0,i).reverse().find(x=>x.slice(0,7)===dt.slice(0,7)); // prior date same month
+    const ewd=workingDays(new Date(dt.slice(0,8)+'01'),new Date(dt)); // WD from month start to dt
+    for(const g of BUDGET_GROUPS){
+      const mtd=byDate[dt][g]; if(mtd==null)continue;
+      const delta=prior&&byDate[prior][g]!=null?mtd-byDate[prior][g]:mtd;
+      out.push(`<tr><td class="mono">${dt}</td><td>${g}</td><td class="num">${money(mtd)}</td>
+        <td class="num">${money(delta)}</td><td class="num">${ewd}</td><td class="num">${money(ewd>0?mtd/ewd:0)}</td></tr>`);
+    }
+  }
+  body.innerHTML=out.length?out.join(''):'<tr><td colspan="6" class="empty">Enter MTD values to see derived daily + pace.</td></tr>';
 }
 
 function exportTargets(){
@@ -456,11 +498,11 @@ function exportTargets(){
     return [g,Math.round(p.budget||0),Math.round(p.forecast||0),Math.round(p.sni||0),PERIOD];});
   download(`Monthly_Targets_${PERIOD}.csv`,toCSV(H,rows));
 }
-function exportDaily(){
-  const H=['Date','Budget Group','Invoiced Amount'];
-  const rows=DAILY.slice().sort((a,b)=>(a.invoice_date>b.invoice_date?1:-1))
-    .map(d=>[d.invoice_date,d.budget_group,Math.round(num(d.amount))]);
-  download(`Daily_Invoiced_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
+function exportMTD(){
+  const H=['As-of Date','Budget Group','MTD Invoiced $'];
+  const rows=MTD.slice().sort((a,b)=>(a.invoice_date>b.invoice_date?1:(a.invoice_date<b.invoice_date?-1:(a.budget_group>b.budget_group?1:-1))))
+    .map(r=>[r.invoice_date,r.budget_group,Math.round(num(r.mtd_amount))]);
+  download(`MTD_Invoiced_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
 }
 
 // ── access gate: restrict Projection + Pacing tabs to admins ─────────
@@ -482,7 +524,7 @@ function switchView(v,el){
   ['review','projection','inputs'].forEach(x=>$('view-'+x).classList.toggle('hidden',x!==v));
   $('loadbar').classList.toggle('hidden',v!=='review');
   if(v==='projection')renderProjection();
-  if(v==='inputs')buildPacingEditor();
+  if(v==='inputs'){buildPacingEditor();buildMtdInputs();renderMtdBreakdown();}
 }
 </script>
 </body>

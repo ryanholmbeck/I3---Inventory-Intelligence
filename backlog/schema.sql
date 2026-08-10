@@ -158,3 +158,20 @@ drop policy if exists anon_all on bl_admins;
 create policy anon_all on bl_admins for all to anon using (true) with check (true);
 -- Example (uncomment + edit):
 -- insert into bl_admins(username,note) values ('FLUIDFLOW\RYANHOLMBECK','owner') on conflict do nothing;
+
+-- ── bl_mtd_invoiced — cumulative MTD invoiced $ per date × group ─────
+-- Flow360 reports MTD (not daily), so we enter the running MTD number
+-- each day; the app derives "yesterday's daily" as today's MTD minus the
+-- prior working day's MTD. Invoiced-MTD for the projection = the latest
+-- MTD value in the current month.
+create table if not exists bl_mtd_invoiced (
+  invoice_date date not null,
+  budget_group text not null,
+  mtd_amount   double precision default 0,
+  updated_at   timestamptz not null default now(),
+  updated_by   text,
+  primary key (invoice_date, budget_group)
+);
+alter table bl_mtd_invoiced enable row level security;
+drop policy if exists anon_all on bl_mtd_invoiced;
+create policy anon_all on bl_mtd_invoiced for all to anon using (true) with check (true);
