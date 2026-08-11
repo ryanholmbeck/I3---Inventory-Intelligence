@@ -267,11 +267,17 @@ def refresh(cfg):
     else:
         print("  (no sales_orders URL — salesperson/order date will be blank)")
 
-    # open purchase lines -> which (item, location) are on a PO
+    # open purchase lines -> which (item, location) are on a PO.
+    # $select/$filter to only open Order lines keeps this pull small; falls
+    # back to a full pull if the web service rejects those options.
     on_po = set()
     if is_url(ents.get('purchase_lines')):
         try:
-            for pl in fetch_all(s, ents['purchase_lines']):
+            purl = ents['purchase_lines']
+            pp = usable_params(s, purl, {
+                '$select': 'No,Location_Code,Outstanding_Quantity,Document_Type',
+                '$filter': "Document_Type eq 'Order' and Outstanding_Quantity gt 0"})
+            for pl in fetch_all(s, purl, pp):
                 if numf(pl.get('Outstanding_Quantity')) > 0:
                     on_po.add((str(pl.get('No', '')).strip(), str(pl.get('Location_Code', '')).strip()))
             print(f"  open PO item/locations: {len(on_po):,}")
