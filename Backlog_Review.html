@@ -63,6 +63,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 /* order detail modal */
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;
   justify-content:center;padding:40px 16px;z-index:50;overflow:auto}
+.modal.hidden{display:none}  /* beats .modal's display:flex regardless of rule order */
 .modal .box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);
   width:min(1000px,100%);max-height:calc(100vh - 80px);overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
 .modal .mhead{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border);
