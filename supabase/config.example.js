@@ -9,4 +9,8 @@
 window.SUPABASE_CONFIG = {
   url: 'https://YOUR-PROJECT.supabase.co',
   anonKey: 'sb_publishable_xxxxxxxxxxxxxxxxxxxxxx',
+  // Which source_system's rows the Backlog Review app reads from
+  // bl_source_lines. Matches refresh_backlog.py's source_system. Defaults
+  // to 'INDELCO_BC'; change when pointing at a different feed (e.g. NetSuite).
+  sourceSystem: 'INDELCO_BC',
 };

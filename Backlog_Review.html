@@ -75,11 +75,12 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 
   <!-- data load -->
   <div class="bar" id="loadbar">
-    <div class="drop" id="drop" style="flex:1" onclick="document.getElementById('file').click()">
-      Drop the daily <b>Source Sales Lines</b> CSV here, or click to choose. (Refresh script will automate this later.)
+    <button class="btn" id="reload" onclick="loadFromCloud(true)" title="Pull the latest open orders from the cloud">↻ Reload orders</button>
+    <span class="tag" id="loadinfo"></span>
+    <div class="drop" id="drop" style="flex:1;padding:8px" onclick="document.getElementById('file').click()">
+      Orders load automatically from the cloud. Need a manual/offline load? Drop a <b>Source Sales Lines</b> CSV here.
       <input type="file" id="file" accept=".csv" class="hidden">
     </div>
-    <span class="tag" id="loadinfo"></span>
   </div>
 
   <!-- REVIEW VIEW -->
@@ -216,6 +217,8 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   $('fSearch').addEventListener('input',renderReview);
   $('mtdDate').addEventListener('change',buildMtdInputs);
   await applyAccessGate();
+  // primary data path: pull open orders from the cloud (CSV drop is fallback)
+  await loadFromCloud();
 })();
 
 async function loadReviews(){REVIEWS={};const r=await sbSel('bl_order_review','select=*');if(r)r.forEach(x=>REVIEWS[x.document_no]=x);}
@@ -241,6 +244,58 @@ function loadCSV(file){
     $('loadinfo').textContent=`${lines.length.toLocaleString()} lines · ${ORDERS.length.toLocaleString()} orders · ${file.name}`;
     populateFilters(); renderReview(); renderProjection();
   }});
+}
+// ── Cloud load: read open orders straight from bl_source_lines ───────
+// This is the primary path — the refresh_backlog.py job keeps that table
+// current, so anyone opening the app sees live orders with no CSV drop.
+async function sbSelAll(t,cols,filter){
+  // PostgREST caps a response (default 1000 rows); page until short.
+  const page=1000; let off=0, all=[];
+  for(;;){
+    const q=`select=${cols}${filter?('&'+filter):''}&order=document_no.asc,line_no.asc&limit=${page}&offset=${off}`;
+    const chunk=await sbSel(t,q);
+    if(!chunk||!chunk.length)break;
+    all=all.concat(chunk);
+    if(chunk.length<page)break;
+    off+=page;
+  }
+  return all;
+}
+async function loadFromCloud(manual){
+  if(!sbOn()){if(manual)$('loadinfo').textContent='no cloud configured — drop a CSV instead';return;}
+  const btn=$('reload'); if(btn){btn.disabled=true;btn.textContent='↻ loading…';}
+  $('loadinfo').textContent='loading from cloud…';
+  try{
+    const src=(SB.sourceSystem)||'INDELCO_BC';
+    const cols='document_no,line_no,customer_no,location_code,branch_name,salesperson,outstanding_quantity,outstanding_amount,qty_on_hand,status,shipment_date,order_date,is_drop_ship';
+    const raw=await sbSelAll('bl_source_lines',cols,`source_system=eq.${encodeURIComponent(src)}`);
+    if(raw===null){$('loadinfo').textContent='cloud unreachable — drop a CSV instead';return;}
+    const lines=raw.map(cloudLine);
+    ORDERS=summarize(lines);
+    const when=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    $('loadinfo').textContent=`${lines.length.toLocaleString()} lines · ${ORDERS.length.toLocaleString()} orders · ☁ cloud ${when}`;
+    populateFilters(); renderReview(); renderProjection();
+  }catch(e){console.warn('loadFromCloud',e);$('loadinfo').textContent='cloud load failed — drop a CSV instead';}
+  finally{if(btn){btn.disabled=false;btn.textContent='↻ Reload orders';}}
+}
+// map a bl_source_lines row into the same shape summarize() expects
+function cloudLine(r){
+  const loc=clean(r.location_code);
+  return {
+    document_no:clean(r.document_no),
+    customer_no:clean(r.customer_no),
+    location_code:loc,
+    branch_name:clean(r.branch_name)||(GMAP[loc]&&GMAP[loc].name)||loc,
+    salesperson:clean(r.salesperson),
+    outstanding_amount:num(r.outstanding_amount),
+    outstanding_qty:num(r.outstanding_quantity),
+    qty_on_hand:num(r.qty_on_hand),
+    po_number:'', on_po:0,
+    status:clean(r.status),
+    shipment_date:dstr(r.shipment_date),
+    is_ds:r.is_drop_ship?'Yes':'',
+    budget_group:(GMAP[loc]&&GMAP[loc].group)||'',
+  };
 }
 function col(row,...names){for(const n of names){for(const k in row){if(k.toLowerCase().trim()===n.toLowerCase()){return row[k];}}}return '';}
 function normalizeLine(row){
