@@ -265,7 +265,8 @@ def build_keyset(s, url, item_fields, loc_fields, label,
                 continue          # finished / nothing remaining
             if item:
                 keys.add((item, loc))
-        print(f"  {label}: {len(keys):,} item/locations")
+        sample = f"  e.g. {list(keys)[:3]}" if keys else ""
+        print(f"  {label}: {len(keys):,} item/locations{sample}")
     except Exception as e:
         print(f"  ({label} skipped: {e})")
     return keys
@@ -323,7 +324,7 @@ def refresh(cfg):
     # 'Source_No' is the produced item on a production order header; assembly
     # orders expose the assembled 'Item_No'. Field names are auto-detected.
     on_asm = build_keyset(s, ents.get('assembly_orders'),
-                          item_fields=('Item_No', 'No'),
+                          item_fields=('Item_No', 'Assembly_Item_No'),
                           loc_fields=('Location_Code',),
                           label='open assembly orders')
     on_prod = build_keyset(s, ents.get('production_orders'),
