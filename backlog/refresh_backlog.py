@@ -59,6 +59,7 @@ LINE_MAP = {
     'document_no':          'Document_No',
     'line_no':              'Line_No',
     'customer_no':          'Sell_to_Customer_No',
+    'customer_name':        'Sell_to_Customer_Name',
     'location_code':        'Location_Code',
     'item_no':              'No',
     'description':          'Description',
@@ -303,7 +304,8 @@ def refresh(cfg):
         rows.append({
             'source_system': src, 'document_no': doc,
             'line_no': int(numf(g(sl, 'line_no'))),
-            'customer_no': g(sl, 'customer_no'), 'location_code': loc,
+            'customer_no': g(sl, 'customer_no'),
+            'customer_name': g(sl, 'customer_name'), 'location_code': loc,
             'branch_name': None, 'salesperson': hdr.get('salesperson'),
             'buyer_name': None, 'vendor_no': None, 'vendor_name': None,
             'item_no': item, 'description': g(sl, 'description'),

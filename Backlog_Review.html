@@ -9,11 +9,19 @@
 <script src="supabase/config.js" onerror="console.info('no hosted config')"></script>
 <!-- Local override for the on-prem server (gitignored). Loads second so it wins locally. -->
 <script src="supabase/config.local.js" onerror="console.info('no local config override')"></script>
+<!-- Apply saved theme before paint (default light) to avoid a flash. -->
+<script>try{var t=localStorage.getItem('bl_theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}</script>
 <style>
-:root{--bg:#0f1117;--bg2:#171b26;--bg3:#1e2333;--border:#2d3448;--border2:#3a4260;
---text:#e8eaf0;--text2:#9aa3b8;--text3:#5d6680;--accent:#4d7cfe;--green:#2ec27e;
---amber:#f5a623;--red:#e05252;--teal:#26c4c4;--purple:#a569e0;--r:8px;
+/* Light is the default palette (bare :root). Dark overrides under [data-theme="dark"]. */
+:root{--bg:#eef1f6;--bg2:#ffffff;--bg3:#f4f6fa;--border:#dce1ea;--border2:#c6cdda;
+--text:#1b2130;--text2:#5b6577;--text3:#8b94a7;--accent:#3b6fe0;--green:#159a5b;
+--amber:#b9791a;--red:#d0433f;--teal:#149a9a;--purple:#8a55cf;
+--hover:rgba(0,0,0,.035);--shadow:rgba(20,30,60,.18);--r:8px;
 --font:'Segoe UI',system-ui,sans-serif;--mono:'Consolas',monospace}
+:root[data-theme="dark"]{--bg:#0f1117;--bg2:#171b26;--bg3:#1e2333;--border:#2d3448;--border2:#3a4260;
+--text:#e8eaf0;--text2:#9aa3b8;--text3:#5d6680;--accent:#4d7cfe;--green:#2ec27e;
+--amber:#f5a623;--red:#e05252;--teal:#26c4c4;--purple:#a569e0;
+--hover:rgba(255,255,255,.03);--shadow:rgba(0,0,0,.5)}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px}
 #top{display:flex;align-items:center;gap:16px;padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--border)}
@@ -38,7 +46,14 @@ padding:6px 9px;border-radius:var(--r);font-size:12px;font-family:var(--font)}
 table{border-collapse:collapse;width:100%;font-size:12px}
 th,td{padding:6px 9px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--border)}
 th{background:var(--bg3);position:sticky;top:0;color:var(--text2);font-weight:600;z-index:1}
-tr:hover td{background:rgba(255,255,255,.02)}
+tr:hover td{background:var(--hover)}
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--text)}
+th .arrow{opacity:.5;font-size:9px;margin-left:2px}
+.theme-btn,.iconbtn{background:var(--bg3);border:1px solid var(--border);color:var(--text2);
+  border-radius:var(--r);cursor:pointer;font-size:13px;padding:5px 9px;line-height:1}
+.theme-btn:hover,.iconbtn:hover{color:var(--text)}
+input:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 td.num,th.num{text-align:right;font-family:var(--mono)}
 td.mono{font-family:var(--mono)}
 .pill{padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600}
@@ -65,7 +80,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
   justify-content:center;padding:40px 16px;z-index:50;overflow:auto}
 .modal.hidden{display:none}  /* beats .modal's display:flex regardless of rule order */
 .modal .box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);
-  width:min(1000px,100%);max-height:calc(100vh - 80px);overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  width:min(1000px,100%);max-height:calc(100vh - 80px);overflow:auto;box-shadow:0 20px 60px var(--shadow)}
 .modal .mhead{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border);
   position:sticky;top:0;background:var(--bg2);z-index:1}
 .modal .mhead h2{font-size:15px;font-family:var(--mono)}
@@ -87,10 +102,11 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.7</span>
+  <span class="tag" id="ver">v0.8</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
-  <span id="whoami" title="Who are you? Used for 'Only mine' and to stamp your reviews.">👤 <select id="whoPick"></select></span>
+  <span id="whoami" title="You — set by picking your name in the Salesperson filter with 'Only mine' on. Stamps your reviews.">👤 <span id="whoName">—</span></span>
+  <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light / dark">🌙</button>
   <span id="sb-status">☁ checking…</span>
 </div>
 <div class="tabs">
@@ -100,14 +116,13 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 </div>
 <div id="content">
 
-  <!-- data load -->
+  <!-- data load (cloud-primary; CSV drop kept hidden as an offline fallback) -->
   <div class="bar" id="loadbar">
     <button class="btn" id="reload" onclick="loadFromCloud(true)" title="Pull the latest open orders from the cloud">↻ Reload orders</button>
     <span class="tag" id="loadinfo"></span>
-    <div class="drop" id="drop" style="flex:1;padding:8px" onclick="document.getElementById('file').click()">
-      Orders load automatically from the cloud. Need a manual/offline load? Drop a <b>Source Sales Lines</b> CSV here.
-      <input type="file" id="file" accept=".csv" class="hidden">
-    </div>
+    <span class="spacer"></span>
+    <button class="iconbtn" onclick="document.getElementById('file').click()" title="Manual/offline: import a Source Sales Lines CSV">⇪ Import CSV</button>
+    <div class="drop hidden" id="drop"><input type="file" id="file" accept=".csv" class="hidden"></div>
   </div>
 
   <!-- REVIEW VIEW -->
@@ -133,12 +148,19 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
     </div>
     <div class="wrap"><table id="tblReview">
       <thead><tr>
-        <th>Order</th><th>Customer</th><th>Branch</th><th>Salesperson</th>
-        <th class="num">Total $</th><th class="num">In Stock $</th><th class="num">Needs PO $</th><th class="num">On PO $</th>
-        <th>Earliest Ship</th><th class="num">Days Late</th>
+        <th class="sortable" onclick="setSort('document_no')">Order<span class="arrow" data-k="document_no"></span></th>
+        <th class="sortable" onclick="setSort('customer')">Customer<span class="arrow" data-k="customer"></span></th>
+        <th class="sortable" onclick="setSort('branch_name')">Branch<span class="arrow" data-k="branch_name"></span></th>
+        <th class="sortable" onclick="setSort('salesperson')">Salesperson<span class="arrow" data-k="salesperson"></span></th>
+        <th class="num sortable" onclick="setSort('total')">Total $<span class="arrow" data-k="total"></span></th>
+        <th class="num sortable" onclick="setSort('in_stock')">In Stock $<span class="arrow" data-k="in_stock"></span></th>
+        <th class="num sortable" onclick="setSort('needs_po')">Needs PO $<span class="arrow" data-k="needs_po"></span></th>
+        <th class="num sortable" onclick="setSort('on_po')">On PO $<span class="arrow" data-k="on_po"></span></th>
+        <th class="sortable" onclick="setSort('earliest')">Earliest Ship<span class="arrow" data-k="earliest"></span></th>
+        <th class="num sortable" onclick="setSort('days_late')">Days Late<span class="arrow" data-k="days_late"></span></th>
         <th>Ship This Mo</th><th>New Ship Date</th><th>Notes</th><th>By</th>
       </tr></thead>
-      <tbody id="revBody"><tr><td colspan="14" class="empty">Load the Source Sales Lines CSV to begin.</td></tr></tbody>
+      <tbody id="revBody"><tr><td colspan="14" class="empty">Loading orders…</td></tr></tbody>
     </table></div>
   </div>
 
@@ -230,7 +252,8 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   // else the workstation user from the local server (/whoami); else pick one.
   WHO=(localStorage.getItem('bl_who')||'').trim();
   if(!WHO){try{const r=await fetch('/whoami');if(r.ok){WHO=((await r.json()).user||'').trim();}}catch(e){}}
-  populateWho();  // show current identity now; refreshed with the rep list once orders load
+  updateWhoUI();  // show current identity now
+  $('themeBtn').textContent=document.documentElement.getAttribute('data-theme')==='dark'?'☀️':'🌙';
   // supabase status
   const st=$('sb-status');
   if(!sbOn()){st.textContent='☁ local only';st.style.color='var(--text3)';}
@@ -255,9 +278,11 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   ['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('over');}));
   ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('over');}));
   dz.addEventListener('drop',e=>{if(e.dataTransfer.files[0])loadCSV(e.dataTransfer.files[0]);});
-  ['fSales','fGroup','fBranch','fStatus','fMine','fWindow'].forEach(id=>$(id).addEventListener('change',renderReview));
+  ['fGroup','fBranch','fStatus','fWindow'].forEach(id=>$(id).addEventListener('change',renderReview));
   $('fSearch').addEventListener('input',renderReview);
-  $('whoPick').addEventListener('change',async e=>{setWho(e.target.value);renderReview();await applyAccessGate();});
+  // identity via the Salesperson filter: picking a name while "Only mine" is on = "that's me"
+  $('fSales').addEventListener('change',()=>{if($('fMine').checked&&$('fSales').value)setWho($('fSales').value);renderReview();});
+  $('fMine').addEventListener('change',()=>{if($('fMine').checked){if(WHO)$('fSales').value=WHO;}else{$('fSales').value='';}renderReview();});
   $('mtdDate').addEventListener('change',buildMtdInputs);
   await applyAccessGate();
   // primary data path: pull open orders from the cloud (CSV drop is fallback)
@@ -361,8 +386,11 @@ async function loadFromCloud(manual){
   $('loadinfo').textContent='loading from cloud…';
   try{
     const src=(SB.sourceSystem)||'INDELCO_BC';
-    const cols='document_no,line_no,customer_no,location_code,branch_name,salesperson,item_no,description,uom,quantity,outstanding_quantity,outstanding_amount,qty_on_hand,status,shipment_date,order_date,is_drop_ship';
-    const raw=await sbSelAll('bl_source_lines',cols,`source_system=eq.${encodeURIComponent(src)}`);
+    const base='document_no,line_no,customer_no,location_code,branch_name,salesperson,item_no,description,uom,quantity,outstanding_quantity,outstanding_amount,qty_on_hand,status,shipment_date,order_date,is_drop_ship';
+    const flt=`source_system=eq.${encodeURIComponent(src)}`;
+    // customer_name is a newer column — try it, fall back if it isn't there yet
+    let raw=await sbSelAll('bl_source_lines','customer_name,'+base,flt);
+    if(raw===null||!raw.length)raw=await sbSelAll('bl_source_lines',base,flt);
     if(raw===null){$('loadinfo').textContent='cloud unreachable — drop a CSV instead';return;}
     const lines=raw.map(cloudLine);
     ORDERS=summarize(lines);
@@ -378,6 +406,7 @@ function cloudLine(r){
   return {
     document_no:clean(r.document_no),
     customer_no:clean(r.customer_no),
+    customer_name:clean(r.customer_name),
     location_code:loc,
     branch_name:clean(r.branch_name)||(GMAP[loc]&&GMAP[loc].name)||loc,
     salesperson:clean(r.salesperson),
@@ -404,6 +433,7 @@ function normalizeLine(row){
   return {
     document_no:clean(col(row,'Document No.')),
     customer_no:clean(col(row,'Sell-to Customer No.')),
+    customer_name:clean(col(row,'Sell-to Customer Name','Customer Name')),
     location_code:loc,
     branch_name:clean(col(row,'Branch Name')),
     salesperson:clean(col(row,'Salesperson')),
@@ -432,9 +462,10 @@ function summarize(lines){
   const m={}; LINES_BY_DOC={};
   for(const l of lines){
     let o=m[l.document_no];
-    if(!o){o={document_no:l.document_no,customer_no:l.customer_no,branch_name:l.branch_name,
-      salesperson:l.salesperson,budget_group:l.budget_group,total:0,in_stock:0,needs_po:0,on_po:0,
-      earliest:'',order_date:'',lines:0};m[l.document_no]=o;}
+    if(!o){o={document_no:l.document_no,customer_no:l.customer_no,customer_name:l.customer_name||'',
+      branch_name:l.branch_name,salesperson:l.salesperson,budget_group:l.budget_group,
+      total:0,in_stock:0,needs_po:0,on_po:0,earliest:'',order_date:'',lines:0};m[l.document_no]=o;}
+    if(!o.customer_name&&l.customer_name)o.customer_name=l.customer_name;
     o.total+=l.outstanding_amount; o.lines++;
     if(!o.order_date&&l.order_date)o.order_date=l.order_date;
     (LINES_BY_DOC[l.document_no]||(LINES_BY_DOC[l.document_no]=[])).push(l);
@@ -452,31 +483,52 @@ function summarize(lines){
   }).sort((a,b)=>b.total-a.total);
 }
 
-function populateFilters(){
-  const sales=[...new Set(ORDERS.map(o=>o.salesperson).filter(Boolean))].sort();
-  const br=[...new Set(ORDERS.map(o=>o.branch_name).filter(Boolean))].sort();
-  fill($('fSales'),sales); fill($('fBranch'),br);
-  populateWho();
-}
-// identity picker: list the reps from the data (short names), value is the
-// full DOMAIN\user so it matches salesperson + stamps reviews correctly.
 const shortName=v=>String(v||'').replace(/^.*\\/,'');
-function populateWho(){
-  const pick=$('whoPick'); if(!pick)return;
-  const sales=[...new Set(ORDERS.map(o=>o.salesperson).filter(Boolean))];
-  if(WHO&&!sales.includes(WHO))sales.push(WHO);
-  sales.sort((a,b)=>shortName(a).localeCompare(shortName(b)));
-  pick.innerHTML='<option value="">— pick your name —</option>'+
-    sales.map(s=>`<option value="${s.replace(/"/g,'&quot;')}">${shortName(s)}</option>`).join('');
-  pick.value=WHO||'';
+function populateFilters(){
+  const sales=[...new Set(ORDERS.map(o=>o.salesperson).filter(Boolean))].sort((a,b)=>shortName(a).localeCompare(shortName(b)));
+  const br=[...new Set(ORDERS.map(o=>o.branch_name).filter(Boolean))].sort();
+  fill($('fSales'),sales,shortName); fill($('fBranch'),br);
+  // with "Only mine" on, default the Salesperson filter to the current user
+  if($('fMine').checked&&WHO)$('fSales').value=WHO;
+  updateWhoUI();
 }
+// identity = the Salesperson chosen while "Only mine" is on; stored + stamps reviews
 function setWho(v){
   WHO=(v||'').trim();
   try{WHO?localStorage.setItem('bl_who',WHO):localStorage.removeItem('bl_who');}catch(e){}
-  const pick=$('whoPick'); if(pick)pick.value=WHO;
+  updateWhoUI();
 }
-function fill(sel,vals){const cur=sel.value;sel.innerHTML='<option value="">All</option>';
-  vals.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;sel.appendChild(o);});sel.value=cur;}
+function updateWhoUI(){const el=$('whoName');if(el)el.textContent=shortName(WHO)||'set via Salesperson + Only mine';}
+function toggleTheme(){
+  const dark=document.documentElement.getAttribute('data-theme')==='dark';
+  if(dark){document.documentElement.removeAttribute('data-theme');}
+  else{document.documentElement.setAttribute('data-theme','dark');}
+  try{localStorage.setItem('bl_theme',dark?'light':'dark');}catch(e){}
+  $('themeBtn').textContent=dark?'🌙':'☀️';
+}
+function fill(sel,vals,labelFn){const cur=sel.value;sel.innerHTML='<option value="">All</option>';
+  vals.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=labelFn?labelFn(v):v;sel.appendChild(o);});sel.value=cur;}
+// ── sorting (Order Review grid) ──────────────────────────────────────
+let SORT={key:'total',dir:-1};   // default: Total $ high→low
+function setSort(key){
+  if(SORT.key===key)SORT.dir=-SORT.dir;
+  else SORT={key,dir:(key==='document_no'||key==='branch_name'||key==='salesperson'||key==='customer'||key==='earliest')?1:-1};
+  renderReview();
+}
+function sortVal(o,key){
+  if(key==='customer')return (o.customer_name||o.customer_no||'').toLowerCase();
+  const v=o[key];
+  return typeof v==='number'?v:String(v==null?'':v).toLowerCase();
+}
+function applySort(rows){
+  const {key,dir}=SORT;
+  return rows.slice().sort((a,b)=>{const x=sortVal(a,key),y=sortVal(b,key);
+    return x<y?-dir:x>y?dir:0;});
+}
+function sortArrows(){
+  document.querySelectorAll('#tblReview .arrow').forEach(a=>{
+    a.textContent=a.dataset.k===SORT.key?(SORT.dir>0?' ▲':' ▼'):'';});
+}
 
 // ── Review grid ──────────────────────────────────────────────────────
 const curMonth=()=>new Date().toISOString().slice(0,7);
@@ -510,19 +562,22 @@ function renderReview(){
     if(fst==='new'&&stm)return false;
     if(fst==='yes'&&stm!=='Yes')return false;
     if(fst==='no'&&stm!=='No')return false;
-    if(q&&!(o.document_no.toLowerCase().includes(q)||(o.customer_no||'').toLowerCase().includes(q)))return false;
+    if(q&&!(o.document_no.toLowerCase().includes(q)||(o.customer_no||'').toLowerCase().includes(q)||(o.customer_name||'').toLowerCase().includes(q)))return false;
     return true;
   });
+  rows=applySort(rows);
   REVROWS=rows;
   $('revcount').textContent=`${rows.length.toLocaleString()} orders · ${money(rows.reduce((s,o)=>s+o.total,0))}`;
+  sortArrows();
   const b=$('revBody');
   if(!rows.length){b.innerHTML='<tr><td colspan="14" class="empty">No orders match.</td></tr>';return;}
   b.innerHTML=rows.slice(0,1000).map(o=>{
     const rv=REVIEWS[o.document_no]||{};
     const stm=effStm(rv);
     return `<tr class="${o.days_late>0?'late':''}">
-      <td class="mono"><a class="doclink" onclick="showOrder('${o.document_no}')" title="View header + line details">${o.document_no}</a></td><td class="mono">${o.customer_no||''}</td>
-      <td>${(o.branch_name||'').slice(0,22)}</td><td class="mono">${(o.salesperson||'').replace(/^.*\\/,'')}</td>
+      <td class="mono"><a class="doclink" onclick="showOrder('${o.document_no}')" title="View header + line details">${o.document_no}</a></td>
+      <td>${esc((o.customer_name||o.customer_no||'').slice(0,26))}</td>
+      <td>${esc((o.branch_name||'').slice(0,22))}</td><td class="mono">${esc(shortName(o.salesperson))}</td>
       <td class="num">${money(o.total)}</td><td class="num">${money(o.in_stock)}</td>
       <td class="num">${money(o.needs_po)}</td><td class="num">${money(o.on_po)}</td>
       <td class="mono">${o.earliest||'—'}</td><td class="num ${o.days_late>5?'red':o.days_late>0?'amber':''}">${o.days_late||''}</td>
@@ -530,11 +585,11 @@ function renderReview(){
         <option value=""${stm===''?' selected':''}>—</option>
         <option value="Yes"${stm==='Yes'?' selected':''}>Yes</option>
         <option value="No"${stm==='No'?' selected':''}>No</option></select></td>
-      <td><input type="text" value="${rv.reviewed_ship_date||''}" placeholder="YYYY-MM-DD"
-        onchange="setRev('${o.document_no}','reviewed_ship_date',this.value)"></td>
+      <td><input type="text" value="${rv.reviewed_ship_date||''}" placeholder="in BC" disabled
+        title="Ship dates are changed in Business Central"></td>
       <td><input type="text" value="${(rv.carryover_notes||'').replace(/"/g,'&quot;')}"
         onchange="setRev('${o.document_no}','carryover_notes',this.value)"></td>
-      <td class="mono" style="font-size:10px;color:var(--text3)">${(rv.reviewed_by||'').replace(/^.*\\/,'')}</td>
+      <td class="mono" style="font-size:10px;color:var(--text3)">${shortName(rv.reviewed_by)}</td>
     </tr>`;}).join('');
 }
 
@@ -553,7 +608,8 @@ function showOrder(doc){
   const rv=REVIEWS[doc]||{}; const stm=effStm(rv)||'—';
   $('dTitle').textContent='Order '+doc;
   $('dHead').innerHTML=[
-    fld('Customer',esc(o.customer_no||'—')),
+    fld('Customer',esc(o.customer_name||o.customer_no||'—')),
+    fld('Customer No.',esc(o.customer_no||'—')),
     fld('Salesperson',esc(shortName(o.salesperson))||'—'),
     fld('Budget Group',esc(o.budget_group||'—')),
     fld('Branch',esc(o.branch_name||'—')),
@@ -599,13 +655,13 @@ function download(name,text){
   a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),200);
 }
 function exportReview(){
-  const H=['Order','Customer','Branch','Salesperson','Total $','In Stock $','Needs PO $','On PO $',
+  const H=['Order','Customer No','Customer Name','Branch','Salesperson','Total $','In Stock $','Needs PO $','On PO $',
     'Earliest Ship','Days Late','Ship This Month','New Ship Date','Notes','Reviewed By'];
   const rows=REVROWS.map(o=>{const rv=REVIEWS[o.document_no]||{};
-    return [o.document_no,o.customer_no,o.branch_name,(o.salesperson||'').replace(/^.*\\/,''),
+    return [o.document_no,o.customer_no,o.customer_name||'',o.branch_name,shortName(o.salesperson),
       Math.round(o.total),Math.round(o.in_stock),Math.round(o.needs_po),Math.round(o.on_po),
       o.earliest,o.days_late||0,effStm(rv),rv.reviewed_ship_date||'',rv.carryover_notes||'',
-      (rv.reviewed_by||'').replace(/^.*\\/,'')];});
+      shortName(rv.reviewed_by)];});
   download(`Backlog_Review_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
 }
 

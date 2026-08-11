@@ -185,6 +185,7 @@ create table if not exists bl_source_lines (
   document_no          text not null,
   line_no              integer not null,
   customer_no          text,
+  customer_name        text,
   location_code        text,
   branch_name          text,
   salesperson          text,
@@ -209,3 +210,5 @@ alter table bl_source_lines enable row level security;
 drop policy if exists anon_all on bl_source_lines;
 create policy anon_all on bl_source_lines for all to anon using (true) with check (true);
 create index if not exists idx_bl_sl_ship on bl_source_lines(shipment_date);
+-- patch older tables that predate the customer_name column
+alter table bl_source_lines add column if not exists customer_name text;
