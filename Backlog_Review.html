@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Backlog Review — Daily Order Review & Month-End Forecast</title>
 <script src="vendor/papaparse.min.js"></script>
-<script src="supabase/config.local.js" onerror="console.info('No Supabase config — local only')"></script>
+<!-- Hosted config (written at deploy from a Cloudflare secret; not in the repo). -->
+<script src="supabase/config.js" onerror="console.info('no hosted config')"></script>
+<!-- Local override for the on-prem server (gitignored). Loads second so it wins locally. -->
+<script src="supabase/config.local.js" onerror="console.info('no local config override')"></script>
 <style>
 :root{--bg:#0f1117;--bg2:#171b26;--bg3:#1e2333;--border:#2d3448;--border2:#3a4260;
 --text:#e8eaf0;--text2:#9aa3b8;--text3:#5d6680;--accent:#4d7cfe;--green:#2ec27e;

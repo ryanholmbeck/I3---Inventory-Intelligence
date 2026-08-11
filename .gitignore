@@ -28,8 +28,10 @@ Thumbs.db
 .idea/
 *.swp
 
-# Supabase local config (holds keys) — never commit
+# Supabase config (holds keys) — never commit. config.local.js is the on-prem
+# override; config.js is generated at deploy from a Cloudflare secret.
 supabase/config.local.js
+supabase/config.js
 
 # Backlog refresh local config (OAuth secret) — never commit
 backlog/refresh_config.local.json
