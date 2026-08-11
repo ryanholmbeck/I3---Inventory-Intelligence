@@ -306,7 +306,7 @@ async function loadFromCloud(manual){
   $('loadinfo').textContent='loading from cloud…';
   try{
     const src=(SB.sourceSystem)||'INDELCO_BC';
-    const cols='document_no,line_no,customer_no,location_code,branch_name,salesperson,outstanding_quantity,outstanding_amount,qty_on_hand,status,shipment_date,order_date,is_drop_ship';
+    const cols='document_no,line_no,customer_no,location_code,branch_name,salesperson,item_no,description,uom,quantity,outstanding_quantity,outstanding_amount,qty_on_hand,status,shipment_date,order_date,is_drop_ship';
     const raw=await sbSelAll('bl_source_lines',cols,`source_system=eq.${encodeURIComponent(src)}`);
     if(raw===null){$('loadinfo').textContent='cloud unreachable — drop a CSV instead';return;}
     const lines=raw.map(cloudLine);
