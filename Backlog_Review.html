@@ -685,10 +685,14 @@ function exportMTD(){
 }
 
 // ── access gate: restrict Projection + Pacing tabs to admins ─────────
-// If bl_admins has rows and the workstation user isn't listed, hide those
-// two tabs. If the table is empty/absent, everyone sees them (open until
-// you populate it — so nobody gets locked out before setup).
+// INTERIM: gating is OFF so everyone sees all tabs during preview. The
+// name-picker identity can't represent non-salesperson admins (managers),
+// so bl_admins can't match them yet. Real gating returns with Microsoft
+// SSO — then admin = your email in an allow-list. Flip GATE_TABS to true
+// once identities are real.
+const GATE_TABS=false;
 async function applyAccessGate(){
+  if(!GATE_TABS)return;                          // interim: all tabs open
   const admins=await sbSel('bl_admins','select=username');
   if(!admins||!admins.length)return;            // open
   const me=(WHO||'').toUpperCase();
