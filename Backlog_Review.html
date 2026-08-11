@@ -58,12 +58,35 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 .card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px;margin-bottom:14px}
 .card h3{font-size:13px;margin-bottom:10px}
 .hidden{display:none}
+.doclink{color:var(--accent);cursor:pointer;text-decoration:none;border-bottom:1px dotted var(--accent)}
+.doclink:hover{text-decoration:none;opacity:.8}
+/* order detail modal */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;
+  justify-content:center;padding:40px 16px;z-index:50;overflow:auto}
+.modal .box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);
+  width:min(1000px,100%);max-height:calc(100vh - 80px);overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.modal .mhead{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border);
+  position:sticky;top:0;background:var(--bg2);z-index:1}
+.modal .mhead h2{font-size:15px;font-family:var(--mono)}
+.modal .x{margin-left:auto;cursor:pointer;color:var(--text2);font-size:20px;line-height:1;padding:0 6px}
+.modal .mbody{padding:16px}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+.dgrid .f .l{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)}
+.dgrid .f .v{font-size:13px;margin-top:2px}
+.ltable{width:100%;border-collapse:collapse;font-size:12px}
+.ltable th,.ltable td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}
+.ltable th{color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:52px;background:var(--bg2)}
+.ltable td.num{text-align:right;font-family:var(--mono)}
+.pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;border:1px solid var(--border)}
+.pill.stock{color:var(--green);border-color:rgba(74,181,116,.5)}
+.pill.needs{color:var(--amber);border-color:rgba(214,158,46,.5)}
+.pill.po{color:var(--accent);border-color:rgba(77,124,254,.5)}
 </style>
 </head>
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.5</span>
+  <span class="tag" id="ver">v0.6</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami" title="Who are you? Used for 'Only mine' and to stamp your reviews.">👤 <select id="whoPick"></select></span>
@@ -161,6 +184,15 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
   </div>
 
 </div>
+
+<!-- ORDER DETAIL MODAL -->
+<div id="detail" class="modal hidden" onclick="if(event.target===this)closeOrder()">
+  <div class="box">
+    <div class="mhead"><h2 id="dTitle">Order</h2><span class="x" onclick="closeOrder()" title="Close (Esc)">×</span></div>
+    <div class="mbody"><div class="dgrid" id="dHead"></div><div id="dLinesWrap"></div></div>
+  </div>
+</div>
+
 <script>
 // ── config / state ───────────────────────────────────────────────────
 const SB = window.SUPABASE_CONFIG || null;
@@ -301,6 +333,13 @@ function cloudLine(r){
     shipment_date:dstr(r.shipment_date),
     is_ds:r.is_drop_ship?'Yes':'',
     budget_group:(GMAP[loc]&&GMAP[loc].group)||'',
+    // line-level detail (for the click-to-open order panel)
+    line_no:num(r.line_no),
+    item_no:clean(r.item_no),
+    description:clean(r.description),
+    uom:clean(r.uom),
+    quantity:num(r.quantity),
+    order_date:dstr(r.order_date),
   };
 }
 function col(row,...names){for(const n of names){for(const k in row){if(k.toLowerCase().trim()===n.toLowerCase()){return row[k];}}}return '';}
@@ -323,16 +362,26 @@ function normalizeLine(row){
     shipment_date:dstr(col(row,'Shipment Date')),
     is_ds:clean(col(row,'Is DS')),
     budget_group:(GMAP[loc]&&GMAP[loc].group)||'',
+    // line-level detail (for the click-to-open order panel)
+    line_no:num(col(row,'Line No.')),
+    item_no:clean(col(row,'No.','Item No.')),
+    description:clean(col(row,'Description')),
+    uom:clean(col(row,'Unit of Measure Code','UoM')),
+    quantity:num(col(row,'Quantity')),
+    order_date:dstr(col(row,'Order Date')),
   };
 }
+let LINES_BY_DOC={};   // document_no -> [line, ...] for the detail panel
 function summarize(lines){
-  const m={};
+  const m={}; LINES_BY_DOC={};
   for(const l of lines){
     let o=m[l.document_no];
     if(!o){o={document_no:l.document_no,customer_no:l.customer_no,branch_name:l.branch_name,
       salesperson:l.salesperson,budget_group:l.budget_group,total:0,in_stock:0,needs_po:0,on_po:0,
-      earliest:'',lines:0};m[l.document_no]=o;}
+      earliest:'',order_date:'',lines:0};m[l.document_no]=o;}
     o.total+=l.outstanding_amount; o.lines++;
+    if(!o.order_date&&l.order_date)o.order_date=l.order_date;
+    (LINES_BY_DOC[l.document_no]||(LINES_BY_DOC[l.document_no]=[])).push(l);
     // classify by the workbook's line-status column (matches Order_Review)
     const st=(l.status||'').toLowerCase();
     if(st.includes('in stock'))o.in_stock+=l.outstanding_amount;
@@ -416,7 +465,7 @@ function renderReview(){
     const rv=REVIEWS[o.document_no]||{};
     const stm=effStm(rv);
     return `<tr class="${o.days_late>0?'late':''}">
-      <td class="mono">${o.document_no}</td><td class="mono">${o.customer_no||''}</td>
+      <td class="mono"><a class="doclink" onclick="showOrder('${o.document_no}')" title="View header + line details">${o.document_no}</a></td><td class="mono">${o.customer_no||''}</td>
       <td>${(o.branch_name||'').slice(0,22)}</td><td class="mono">${(o.salesperson||'').replace(/^.*\\/,'')}</td>
       <td class="num">${money(o.total)}</td><td class="num">${money(o.in_stock)}</td>
       <td class="num">${money(o.needs_po)}</td><td class="num">${money(o.on_po)}</td>
@@ -432,6 +481,56 @@ function renderReview(){
       <td class="mono" style="font-size:10px;color:var(--text3)">${(rv.reviewed_by||'').replace(/^.*\\/,'')}</td>
     </tr>`;}).join('');
 }
+
+// ── Order detail panel (click the order number) ──────────────────────
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function statusPill(st){
+  const s=(st||'').toLowerCase();
+  if(s.includes('in stock'))return '<span class="pill stock">In Stock; Ship</span>';
+  if(s.includes('on po'))return '<span class="pill po">On PO</span>';
+  if(s.includes('needs'))return '<span class="pill needs">Needs PO</span>';
+  return `<span class="pill">${esc(st||'None')}</span>`;
+}
+function fld(l,v){return `<div class="f"><div class="l">${l}</div><div class="v">${v}</div></div>`;}
+function showOrder(doc){
+  const o=ORDERS.find(x=>x.document_no===doc); if(!o)return;
+  const rv=REVIEWS[doc]||{}; const stm=effStm(rv)||'—';
+  $('dTitle').textContent='Order '+doc;
+  $('dHead').innerHTML=[
+    fld('Customer',esc(o.customer_no||'—')),
+    fld('Salesperson',esc(shortName(o.salesperson))||'—'),
+    fld('Budget Group',esc(o.budget_group||'—')),
+    fld('Branch',esc(o.branch_name||'—')),
+    fld('Order Date',esc(o.order_date||'—')),
+    fld('Earliest Ship',esc(o.earliest||'—')),
+    fld('Days Late',o.days_late>0?`<span class="${o.days_late>5?'red':'amber'}">${o.days_late}</span>`:'0'),
+    fld('Ship This Month',esc(stm)),
+    fld('Total Open',money(o.total)),
+    fld('In Stock $',`<span class="green">${money(o.in_stock)}</span>`),
+    fld('Needs PO $',`<span class="amber">${money(o.needs_po)}</span>`),
+    fld('On PO $',money(o.on_po)),
+  ].join('');
+  const lines=(LINES_BY_DOC[doc]||[]).slice().sort((a,b)=>(a.line_no||0)-(b.line_no||0));
+  const body=lines.map(l=>`<tr>
+    <td class="num">${l.line_no||''}</td>
+    <td class="mono">${esc(l.item_no)}</td>
+    <td>${esc((l.description||'').slice(0,60))}</td>
+    <td class="mono">${esc(l.location_code)}</td>
+    <td class="num">${(l.quantity||0).toLocaleString()}</td>
+    <td class="num">${(l.outstanding_qty||0).toLocaleString()}</td>
+    <td class="mono">${esc(l.uom)}</td>
+    <td class="num">${(l.qty_on_hand||0).toLocaleString()}</td>
+    <td class="num">${money(l.outstanding_amount)}</td>
+    <td>${statusPill(l.status)}</td>
+    <td class="mono">${esc(l.shipment_date||'')}</td></tr>`).join('');
+  $('dLinesWrap').innerHTML=`<table class="ltable"><thead><tr>
+    <th>Line</th><th>Item</th><th>Description</th><th>Loc</th><th class="num">Qty</th>
+    <th class="num">Open Qty</th><th>UoM</th><th class="num">QoH</th><th class="num">Open $</th>
+    <th>Status</th><th>Ship Date</th></tr></thead><tbody>${body||'<tr><td colspan="11" class="empty">No line detail available.</td></tr>'}</tbody></table>`;
+  $('detail').classList.remove('hidden');
+}
+function closeOrder(){$('detail').classList.add('hidden');}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeOrder();});
 
 // ── CSV export (clean, human-readable headers) ───────────────────────
 function toCSV(headers,rows){
