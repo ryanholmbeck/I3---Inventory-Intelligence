@@ -223,17 +223,52 @@ def numf(v):
     except (TypeError, ValueError): return 0.0
 
 
-def classify(qoh, out_qty, on_po):
-    """v1 line status, mirrors the workbook's Shortage column. Refine once
-    we validate against live data."""
+def classify(qoh, out_qty, on_po, on_asm=False, on_prod=False):
+    """Line status. In-stock ships now; otherwise if the item is covered by an
+    open assembly / production / purchase order it's 'coming', else Needs PO."""
     qoh, out_qty = numf(qoh), numf(out_qty)
     if out_qty > 0 and qoh >= out_qty:
         return 'In Stock; Ship'
+    if on_asm:
+        return 'On Assembly'
+    if on_prod:
+        return 'In Production'
     if on_po:
         return 'On PO'
     if out_qty > 0:
         return 'Needs PO'
     return 'None'
+
+
+def build_keyset(s, url, item_fields, loc_fields, label,
+                 qty_fields=('Remaining_Quantity', 'Remaining_Qty', 'Quantity')):
+    """Pull an order feed (assembly / production) and return the set of
+    (item_no, location_code) with an open order. Field names vary by BC
+    web service, so we try candidates and, if we can't find the item field,
+    print the row's available fields once so it's easy to map."""
+    keys = set()
+    if not is_url(url):
+        return keys
+    try:
+        sample_logged = False
+        for r in fetch_all(s, url):
+            item = next((str(r[f]).strip() for f in item_fields
+                         if r.get(f) not in (None, '')), '')
+            loc = next((str(r[f]).strip() for f in loc_fields
+                        if r.get(f) not in (None, '')), '')
+            if not item and not sample_logged:
+                print(f"    {label}: no item field found. Available fields: "
+                      f"{', '.join(sorted(r.keys()))[:400]}")
+                sample_logged = True
+            q = next((numf(r.get(f)) for f in qty_fields if f in r), None)
+            if q is not None and q <= 0:
+                continue          # finished / nothing remaining
+            if item:
+                keys.add((item, loc))
+        print(f"  {label}: {len(keys):,} item/locations")
+    except Exception as e:
+        print(f"  ({label} skipped: {e})")
+    return keys
 
 
 def refresh(cfg):
@@ -284,6 +319,18 @@ def refresh(cfg):
         except Exception as e:
             print(f"  (purchase lines skipped: {e})")
 
+    # open assembly / released production orders -> (item, location) covered.
+    # 'Source_No' is the produced item on a production order header; assembly
+    # orders expose the assembled 'Item_No'. Field names are auto-detected.
+    on_asm = build_keyset(s, ents.get('assembly_orders'),
+                          item_fields=('Item_No', 'No'),
+                          loc_fields=('Location_Code',),
+                          label='open assembly orders')
+    on_prod = build_keyset(s, ents.get('production_orders'),
+                           item_fields=('Source_No', 'Item_No'),
+                           loc_fields=('Location_Code',),
+                           label='released production orders')
+
     # Sales Lines — $select the mapped fields and $filter server-side to open
     # order lines only. This cuts both width (fewer columns) and length (skips
     # quotes and fully-shipped lines) so the pull returns fast.
@@ -320,7 +367,8 @@ def refresh(cfg):
             'shipment_date': str(sd)[:10] if sd else None,
             'order_date': str(od)[:10] if od else None,
             'qty_on_hand': numf(g(sl, 'qty_on_hand')),
-            'status': classify(g(sl, 'qty_on_hand'), oq, (item, loc) in on_po),
+            'status': classify(g(sl, 'qty_on_hand'), oq, (item, loc) in on_po,
+                               (item, loc) in on_asm, (item, loc) in on_prod),
             'is_drop_ship': bool(g(sl, 'is_drop_ship')),
         })
     print(f"  open order lines: {len(rows):,}")

@@ -97,12 +97,14 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 .pill.stock{color:var(--green);border-color:rgba(74,181,116,.5)}
 .pill.needs{color:var(--amber);border-color:rgba(214,158,46,.5)}
 .pill.po{color:var(--accent);border-color:rgba(77,124,254,.5)}
+.pill.asm{color:var(--purple);border-color:rgba(138,85,207,.5)}
+.pill.prod{color:var(--teal);border-color:rgba(20,154,154,.5)}
 </style>
 </head>
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.8</span>
+  <span class="tag" id="ver">v0.9</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami" title="You — set by picking your name in the Salesperson filter with 'Only mine' on. Stamps your reviews.">👤 <span id="whoName">—</span></span>
@@ -155,7 +157,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
         <th class="num sortable" onclick="setSort('total')">Total $<span class="arrow" data-k="total"></span></th>
         <th class="num sortable" onclick="setSort('in_stock')">In Stock $<span class="arrow" data-k="in_stock"></span></th>
         <th class="num sortable" onclick="setSort('needs_po')">Needs PO $<span class="arrow" data-k="needs_po"></span></th>
-        <th class="num sortable" onclick="setSort('on_po')">On PO $<span class="arrow" data-k="on_po"></span></th>
+        <th class="num sortable" onclick="setSort('on_po')" title="Covered by an open PO, assembly, or production order">On Order $<span class="arrow" data-k="on_po"></span></th>
         <th class="sortable" onclick="setSort('earliest')">Earliest Ship<span class="arrow" data-k="earliest"></span></th>
         <th class="num sortable" onclick="setSort('days_late')">Days Late<span class="arrow" data-k="days_late"></span></th>
         <th>Ship This Mo</th><th>New Ship Date</th><th>Notes</th><th>By</th>
@@ -469,10 +471,11 @@ function summarize(lines){
     o.total+=l.outstanding_amount; o.lines++;
     if(!o.order_date&&l.order_date)o.order_date=l.order_date;
     (LINES_BY_DOC[l.document_no]||(LINES_BY_DOC[l.document_no]=[])).push(l);
-    // classify by the workbook's line-status column (matches Order_Review)
+    // bucket $ by line status. Assembly/Production/PO are all "on order"
+    // (covered, coming) → the On Order column; only true gaps are Needs PO.
     const st=(l.status||'').toLowerCase();
     if(st.includes('in stock'))o.in_stock+=l.outstanding_amount;
-    else if(st.includes('on po'))o.on_po+=l.outstanding_amount;
+    else if(st.includes('on po')||st.includes('assembly')||st.includes('production'))o.on_po+=l.outstanding_amount;
     else o.needs_po+=l.outstanding_amount; // 'Needs PO' / 'None' (0 amt)
     if(l.shipment_date&&(!o.earliest||l.shipment_date<o.earliest))o.earliest=l.shipment_date;
   }
@@ -598,6 +601,8 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
 function statusPill(st){
   const s=(st||'').toLowerCase();
   if(s.includes('in stock'))return '<span class="pill stock">In Stock; Ship</span>';
+  if(s.includes('assembly'))return '<span class="pill asm">On Assembly</span>';
+  if(s.includes('production'))return '<span class="pill prod">In Production</span>';
   if(s.includes('on po'))return '<span class="pill po">On PO</span>';
   if(s.includes('needs'))return '<span class="pill needs">Needs PO</span>';
   return `<span class="pill">${esc(st||'None')}</span>`;
@@ -655,7 +660,7 @@ function download(name,text){
   a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),200);
 }
 function exportReview(){
-  const H=['Order','Customer No','Customer Name','Branch','Salesperson','Total $','In Stock $','Needs PO $','On PO $',
+  const H=['Order','Customer No','Customer Name','Branch','Salesperson','Total $','In Stock $','Needs PO $','On Order $',
     'Earliest Ship','Days Late','Ship This Month','New Ship Date','Notes','Reviewed By'];
   const rows=REVROWS.map(o=>{const rv=REVIEWS[o.document_no]||{};
     return [o.document_no,o.customer_no,o.customer_name||'',o.branch_name,shortName(o.salesperson),

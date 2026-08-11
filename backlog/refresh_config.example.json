@@ -4,9 +4,11 @@
   "auth": "windows",
 
   "entities": {
-    "sales_lines":    "PASTE YOUR SALES LINES ODATA URL HERE",
-    "sales_orders":   "PASTE YOUR SALES ORDERS ODATA URL HERE (needed for salesperson)",
-    "purchase_lines": "leave as-is to skip (adds On-PO vs Needs-PO later)"
+    "sales_lines":       "PASTE YOUR SALES LINES ODATA URL HERE",
+    "sales_orders":      "PASTE YOUR SALES ORDERS ODATA URL HERE (needed for salesperson)",
+    "purchase_lines":    "PASTE PURCHASE LINES URL to split On-PO vs Needs-PO (or leave text to skip)",
+    "assembly_orders":   "PASTE ASSEMBLY ORDERS URL for 'On Assembly' status (or leave text to skip)",
+    "production_orders": "PASTE RELEASED PRODUCTION ORDERS URL for 'In Production' status (or leave text to skip)"
   },
 
   "_salesperson_field": "Which Sales Orders field holds the DOMAIN\\user salesperson. Default 'Assigned_User_ID'. If the probe shows the reviewer under a different field (e.g. 'Created_By'), set salesperson_field to that.",
