@@ -27,6 +27,8 @@ call :get "Indelco_SSMS_Connector.py"
 call :get "bc_pull.py"
 call :get "Run_Backlog_Refresh.bat"
 call :get "Start_Backlog.bat"
+call :get "Refresh_Task.bat"
+call :get "Install_Refresh_Schedule.bat"
 :: backlog toolkit (subfolder). config.local.json is yours + never downloaded.
 if not exist backlog mkdir backlog
 call :get "backlog/refresh_backlog.py"

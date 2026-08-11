@@ -2,6 +2,7 @@
 setlocal
 title Backlog Review - Refresh from Business Central
 color 0B
+cd /d "%~dp0"
 echo.
 echo  ==========================================
 echo   BACKLOG REVIEW - Refresh from BC

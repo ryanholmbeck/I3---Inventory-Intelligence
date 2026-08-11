@@ -60,10 +60,10 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.4</span>
+  <span class="tag" id="ver">v0.5</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
-  <span id="whoami">…</span>
+  <span id="whoami" title="Who are you? Used for 'Only mine' and to stamp your reviews.">👤 <select id="whoPick"></select></span>
   <span id="sb-status">☁ checking…</span>
 </div>
 <div class="tabs">
@@ -186,9 +186,11 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
 
 // ── init ─────────────────────────────────────────────────────────────
 (async function init(){
-  // identity
-  try{const r=await fetch('/whoami');if(r.ok){WHO=(await r.json()).user||'';}}catch(e){}
-  $('whoami').textContent='👤 '+(WHO||'unknown');
+  // identity: a saved pick wins (works on any machine / the hosted web link);
+  // else the workstation user from the local server (/whoami); else pick one.
+  WHO=(localStorage.getItem('bl_who')||'').trim();
+  if(!WHO){try{const r=await fetch('/whoami');if(r.ok){WHO=((await r.json()).user||'').trim();}}catch(e){}}
+  populateWho();  // show current identity now; refreshed with the rep list once orders load
   // supabase status
   const st=$('sb-status');
   if(!sbOn()){st.textContent='☁ local only';st.style.color='var(--text3)';}
@@ -215,6 +217,7 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   dz.addEventListener('drop',e=>{if(e.dataTransfer.files[0])loadCSV(e.dataTransfer.files[0]);});
   ['fSales','fGroup','fBranch','fStatus','fMine','fWindow'].forEach(id=>$(id).addEventListener('change',renderReview));
   $('fSearch').addEventListener('input',renderReview);
+  $('whoPick').addEventListener('change',async e=>{setWho(e.target.value);renderReview();await applyAccessGate();});
   $('mtdDate').addEventListener('change',buildMtdInputs);
   await applyAccessGate();
   // primary data path: pull open orders from the cloud (CSV drop is fallback)
@@ -345,6 +348,24 @@ function populateFilters(){
   const sales=[...new Set(ORDERS.map(o=>o.salesperson).filter(Boolean))].sort();
   const br=[...new Set(ORDERS.map(o=>o.branch_name).filter(Boolean))].sort();
   fill($('fSales'),sales); fill($('fBranch'),br);
+  populateWho();
+}
+// identity picker: list the reps from the data (short names), value is the
+// full DOMAIN\user so it matches salesperson + stamps reviews correctly.
+const shortName=v=>String(v||'').replace(/^.*\\/,'');
+function populateWho(){
+  const pick=$('whoPick'); if(!pick)return;
+  const sales=[...new Set(ORDERS.map(o=>o.salesperson).filter(Boolean))];
+  if(WHO&&!sales.includes(WHO))sales.push(WHO);
+  sales.sort((a,b)=>shortName(a).localeCompare(shortName(b)));
+  pick.innerHTML='<option value="">— pick your name —</option>'+
+    sales.map(s=>`<option value="${s.replace(/"/g,'&quot;')}">${shortName(s)}</option>`).join('');
+  pick.value=WHO||'';
+}
+function setWho(v){
+  WHO=(v||'').trim();
+  try{WHO?localStorage.setItem('bl_who',WHO):localStorage.removeItem('bl_who');}catch(e){}
+  const pick=$('whoPick'); if(pick)pick.value=WHO;
 }
 function fill(sel,vals){const cur=sel.value;sel.innerHTML='<option value="">All</option>';
   vals.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;sel.appendChild(o);});sel.value=cur;}

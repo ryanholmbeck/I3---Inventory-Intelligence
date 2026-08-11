@@ -8,6 +8,9 @@
 # CSV exports from SSMS / BC pulls
 *.csv
 
+# Log files (e.g. scheduled refresh output)
+*.log
+
 # Historical / legacy data staging
 historical/
 
