@@ -99,12 +99,34 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 .pill.po{color:var(--accent);border-color:rgba(77,124,254,.5)}
 .pill.asm{color:var(--purple);border-color:rgba(138,85,207,.5)}
 .pill.prod{color:var(--teal);border-color:rgba(20,154,154,.5)}
+/* dashboard */
+.dash-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:860px){.dash-grid{grid-template-columns:1fr}}
+.hbar{display:grid;grid-template-columns:130px 1fr 92px 40px;gap:8px;align-items:center;margin:5px 0;font-size:12px}
+.hbar .lbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text2)}
+.hbar .track{background:var(--bg3);border-radius:5px;height:16px;overflow:hidden}
+.hbar .fill{height:100%;border-radius:5px;background:var(--accent)}
+.hbar .v{text-align:right;font-family:var(--mono)}
+.hbar .n{text-align:right;font-family:var(--mono);color:var(--text3);font-size:11px}
+.sbar{display:flex;height:20px;border-radius:5px;overflow:hidden;background:var(--bg3)}
+.sbar .seg{height:100%}
+.srow{display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;margin:8px 0}
+.srow .lbl{font-size:12px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:var(--text2);margin-top:10px}
+.legend .dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.donutwrap{display:flex;align-items:center;gap:16px}
+.donut{width:120px;height:120px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none}
+.donut .hole{width:80px;height:80px;border-radius:50%;background:var(--bg2);display:flex;flex-direction:column;
+  align-items:center;justify-content:center;font-family:var(--mono)}
+.donut .hole b{font-size:22px;font-weight:600}.donut .hole span{font-size:9px;color:var(--text3)}
+.mini{font-size:12px;color:var(--text2);line-height:1.7}
+.mini b{color:var(--text);font-family:var(--mono)}
 </style>
 </head>
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.9</span>
+  <span class="tag" id="ver">v0.10</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami" title="You — set by picking your name in the Salesperson filter with 'Only mine' on. Stamps your reviews.">👤 <span id="whoName">—</span></span>
@@ -113,6 +135,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 </div>
 <div class="tabs">
   <div class="tab active" data-view="review" onclick="switchView('review',this)">Order Review</div>
+  <div class="tab" data-view="dashboard" onclick="switchView('dashboard',this)">Dashboard</div>
   <div class="tab" data-view="projection" onclick="switchView('projection',this)">Month-End Projection</div>
   <div class="tab" data-view="inputs" onclick="switchView('inputs',this)">Pacing Inputs</div>
 </div>
@@ -157,13 +180,24 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
         <th class="num sortable" onclick="setSort('total')">Total $<span class="arrow" data-k="total"></span></th>
         <th class="num sortable" onclick="setSort('in_stock')">In Stock $<span class="arrow" data-k="in_stock"></span></th>
         <th class="num sortable" onclick="setSort('needs_po')">Needs PO $<span class="arrow" data-k="needs_po"></span></th>
-        <th class="num sortable" onclick="setSort('on_po')" title="Covered by an open PO, assembly, or production order">On Order $<span class="arrow" data-k="on_po"></span></th>
+        <th class="num sortable" onclick="setSort('on_order')" title="Covered by an open PO, assembly, or production order">On Order $<span class="arrow" data-k="on_order"></span></th>
         <th class="sortable" onclick="setSort('earliest')">Earliest Ship<span class="arrow" data-k="earliest"></span></th>
         <th class="num sortable" onclick="setSort('days_late')">Days Late<span class="arrow" data-k="days_late"></span></th>
         <th>Ship This Mo</th><th>New Ship Date</th><th>Notes</th><th>By</th>
       </tr></thead>
       <tbody id="revBody"><tr><td colspan="14" class="empty">Loading orders…</td></tr></tbody>
     </table></div>
+  </div>
+
+  <!-- DASHBOARD VIEW -->
+  <div id="view-dashboard" class="hidden">
+    <div class="kpi-row" id="dashKpis"></div>
+    <div class="dash-grid">
+      <div class="card"><h3>Review Progress</h3><div id="dashProgress"></div></div>
+      <div class="card"><h3>Backlog Aging</h3><div id="dashAging"></div></div>
+    </div>
+    <div class="card"><h3>Reviewed vs Not Reviewed — by Status <span class="tag" style="font-weight:400">(open $ in the review window)</span></h3><div id="dashStatus"></div></div>
+    <div class="card"><h3>Not Reviewed — by Salesperson <span class="tag" style="font-weight:400">(descending by $)</span></h3><div id="dashSales"></div></div>
   </div>
 
   <!-- PROJECTION VIEW -->
@@ -363,7 +397,7 @@ function loadCSV(file){
     const lines=res.data.map(normalizeLine).filter(l=>l.document_no);
     ORDERS=summarize(lines);
     $('loadinfo').textContent=`${lines.length.toLocaleString()} lines · ${ORDERS.length.toLocaleString()} orders · ${file.name}`;
-    populateFilters(); renderReview(); renderProjection();
+    populateFilters(); renderReview(); renderProjection(); renderDashboard();
   }});
 }
 // ── Cloud load: read open orders straight from bl_source_lines ───────
@@ -398,7 +432,7 @@ async function loadFromCloud(manual){
     ORDERS=summarize(lines);
     const when=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     $('loadinfo').textContent=`${lines.length.toLocaleString()} lines · ${ORDERS.length.toLocaleString()} orders · ☁ cloud ${when}`;
-    populateFilters(); renderReview(); renderProjection();
+    populateFilters(); renderReview(); renderProjection(); renderDashboard();
   }catch(e){console.warn('loadFromCloud',e);$('loadinfo').textContent='cloud load failed — drop a CSV instead';}
   finally{if(btn){btn.disabled=false;btn.textContent='↻ Reload orders';}}
 }
@@ -466,21 +500,24 @@ function summarize(lines){
     let o=m[l.document_no];
     if(!o){o={document_no:l.document_no,customer_no:l.customer_no,customer_name:l.customer_name||'',
       branch_name:l.branch_name,salesperson:l.salesperson,budget_group:l.budget_group,
-      total:0,in_stock:0,needs_po:0,on_po:0,earliest:'',order_date:'',lines:0};m[l.document_no]=o;}
+      total:0,in_stock:0,needs_po:0,on_po:0,on_prod:0,on_asm:0,earliest:'',order_date:'',lines:0};m[l.document_no]=o;}
     if(!o.customer_name&&l.customer_name)o.customer_name=l.customer_name;
     o.total+=l.outstanding_amount; o.lines++;
     if(!o.order_date&&l.order_date)o.order_date=l.order_date;
     (LINES_BY_DOC[l.document_no]||(LINES_BY_DOC[l.document_no]=[])).push(l);
-    // bucket $ by line status. Assembly/Production/PO are all "on order"
-    // (covered, coming) → the On Order column; only true gaps are Needs PO.
-    const st=(l.status||'').toLowerCase();
-    if(st.includes('in stock'))o.in_stock+=l.outstanding_amount;
-    else if(st.includes('on po')||st.includes('assembly')||st.includes('production'))o.on_po+=l.outstanding_amount;
-    else o.needs_po+=l.outstanding_amount; // 'Needs PO' / 'None' (0 amt)
+    // bucket $ by line status (5 buckets; the grid rolls the "coming" ones
+    // into On Order, the dashboard breaks them out)
+    const st=(l.status||'').toLowerCase(), amt=l.outstanding_amount;
+    if(st.includes('in stock'))o.in_stock+=amt;
+    else if(st.includes('assembly'))o.on_asm+=amt;
+    else if(st.includes('production'))o.on_prod+=amt;
+    else if(st.includes('on po'))o.on_po+=amt;
+    else o.needs_po+=amt; // 'Needs PO' / 'None' (0 amt)
     if(l.shipment_date&&(!o.earliest||l.shipment_date<o.earliest))o.earliest=l.shipment_date;
   }
   const today=new Date().toISOString().slice(0,10);
   return Object.values(m).map(o=>{
+    o.on_order=o.on_po+o.on_prod+o.on_asm;   // PO + assembly + production
     o.days_late=(o.earliest&&o.earliest<today)?workingDays(new Date(o.earliest),new Date(today)):0;
     return o;
   }).sort((a,b)=>b.total-a.total);
@@ -582,7 +619,7 @@ function renderReview(){
       <td>${esc((o.customer_name||o.customer_no||'').slice(0,26))}</td>
       <td>${esc((o.branch_name||'').slice(0,22))}</td><td class="mono">${esc(shortName(o.salesperson))}</td>
       <td class="num">${money(o.total)}</td><td class="num">${money(o.in_stock)}</td>
-      <td class="num">${money(o.needs_po)}</td><td class="num">${money(o.on_po)}</td>
+      <td class="num">${money(o.needs_po)}</td><td class="num">${money(o.on_order)}</td>
       <td class="mono">${o.earliest||'—'}</td><td class="num ${o.days_late>5?'red':o.days_late>0?'amber':''}">${o.days_late||''}</td>
       <td><select onchange="setRev('${o.document_no}','ship_this_month',this.value)">
         <option value=""${stm===''?' selected':''}>—</option>
@@ -664,7 +701,7 @@ function exportReview(){
     'Earliest Ship','Days Late','Ship This Month','New Ship Date','Notes','Reviewed By'];
   const rows=REVROWS.map(o=>{const rv=REVIEWS[o.document_no]||{};
     return [o.document_no,o.customer_no,o.customer_name||'',o.branch_name,shortName(o.salesperson),
-      Math.round(o.total),Math.round(o.in_stock),Math.round(o.needs_po),Math.round(o.on_po),
+      Math.round(o.total),Math.round(o.in_stock),Math.round(o.needs_po),Math.round(o.on_order),
       o.earliest,o.days_late||0,effStm(rv),rv.reviewed_ship_date||'',rv.carryover_notes||'',
       shortName(rv.reviewed_by)];});
   download(`Backlog_Review_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
@@ -684,6 +721,77 @@ async function setRev(doc,field,value){
   await sbUp('bl_order_review',payload,'document_no');
   await sbUp('bl_audit',{document_no:doc,field,old_value:String(old),new_value:String(value),changed_by:WHO});
   if(field==='ship_this_month'){renderProjection();$('revcount')&&renderReview();}
+}
+
+// ── Dashboard ────────────────────────────────────────────────────────
+const dSum=(arr,k)=>arr.reduce((s,o)=>s+(o[k]||0),0);
+function dkpi(l,v,sub,cls){
+  return `<div class="kpi"><div class="l">${l}</div><div class="v ${cls||''}">${v}</div>`+
+    (sub?`<div class="tag" style="margin-top:3px">${sub}</div>`:'')+`</div>`;
+}
+function hbar(label,val,max,color,count){
+  const pct=max>0?Math.max(2,Math.round(val/max*100)):0;
+  return `<div class="hbar"><span class="lbl" title="${esc(label)}">${esc(label)}</span>`+
+    `<span class="track"><span class="fill" style="width:${pct}%;background:${color||'var(--accent)'}"></span></span>`+
+    `<span class="v">${money(val)}</span><span class="n">${count!=null?count:''}</span></div>`;
+}
+function donut(pct){
+  const deg=Math.round(Math.max(0,Math.min(1,pct))*360);
+  return `<div class="donut" style="background:conic-gradient(var(--green) 0 ${deg}deg,var(--amber) ${deg}deg 360deg)">`+
+    `<div class="hole"><b>${Math.round(pct*100)}%</b><span>REVIEWED</span></div></div>`;
+}
+function renderDashboard(){
+  if(!$('view-dashboard'))return;
+  const now=new Date();
+  const mStart=new Date(now.getFullYear(),now.getMonth(),1).toISOString().slice(0,10);
+  const isRev=o=>effStm(REVIEWS[o.document_no]||{})!=='';   // has a current-month decision
+  const scope=ORDERS.filter(o=>inWindow(o,'review'));       // actionable review window
+  const pastDue=scope.filter(o=>o.earliest&&o.earliest<mStart);
+  const current=scope.filter(o=>!(o.earliest&&o.earliest<mStart));
+  const future=ORDERS.filter(o=>!inWindow(o,'review'));
+  const notRev=scope.filter(o=>!isRev(o)), rev=scope.filter(isRev);
+  const scopeVal=dSum(scope,'total'), notRevVal=dSum(notRev,'total'), revVal=dSum(rev,'total');
+  const pct=scopeVal>0?revVal/scopeVal:0;
+  $('dashKpis').innerHTML=[
+    dkpi('Past Due (prev month & older)',money(dSum(pastDue,'total')),`${pastDue.length} orders`,'red'),
+    dkpi('Current Review Period',money(dSum(current,'total')),`${current.length} orders`),
+    dkpi('Not Reviewed',money(notRevVal),`${notRev.length} orders`,'amber'),
+    dkpi('Reviewed',money(revVal),`${rev.length} orders`,'green'),
+    dkpi('In Review Window',money(scopeVal),`${scope.length} orders`),
+  ].join('');
+  $('dashProgress').innerHTML=`<div class="donutwrap">${donut(pct)}`+
+    `<div class="mini">Reviewed: <b>${money(revVal)}</b> · ${rev.length} orders<br>`+
+    `Not reviewed: <b>${money(notRevVal)}</b> · ${notRev.length} orders<br>`+
+    `Total in window: <b>${money(scopeVal)}</b> · ${scope.length} orders</div></div>`+
+    `<div class="legend"><span><span class="dot" style="background:var(--green)"></span>Reviewed</span>`+
+    `<span><span class="dot" style="background:var(--amber)"></span>Not reviewed</span></div>`;
+  const ageMax=Math.max(dSum(pastDue,'total'),dSum(current,'total'),dSum(future,'total'),1);
+  $('dashAging').innerHTML=
+    hbar('Past due',dSum(pastDue,'total'),ageMax,'var(--red)',pastDue.length)+
+    hbar('This period',dSum(current,'total'),ageMax,'var(--accent)',current.length)+
+    hbar('Beyond window',dSum(future,'total'),ageMax,'var(--text3)',future.length);
+  const STAT=[['In Stock; Ship','in_stock'],['On PO','on_po'],['On Prod Ord','on_prod'],
+    ['On Ass Order','on_asm'],['No PO','needs_po']];
+  const srows=STAT.map(([label,key])=>{let r=0,n=0;
+    scope.forEach(o=>{const a=o[key]||0;if(isRev(o))r+=a;else n+=a;});return {label,r,n,t:r+n};});
+  const sMax=Math.max(...srows.map(x=>x.t),1);
+  $('dashStatus').innerHTML=srows.map(x=>{
+    const w=Math.max(3,Math.round(x.t/sMax*100)), rp=x.t>0?x.r/x.t*100:0;
+    return `<div class="srow"><span class="lbl">${x.label}</span><div>`+
+      `<div class="sbar" style="width:${w}%"><span class="seg" style="width:${rp}%;background:var(--green)"></span>`+
+      `<span class="seg" style="width:${100-rp}%;background:var(--amber)"></span></div>`+
+      `<div class="mini" style="font-size:11px">Reviewed <b>${money(x.r)}</b> · Not <b>${money(x.n)}</b> · Total <b>${money(x.t)}</b></div>`+
+      `</div></div>`;}).join('')+
+    `<div class="legend"><span><span class="dot" style="background:var(--green)"></span>Reviewed $</span>`+
+    `<span><span class="dot" style="background:var(--amber)"></span>Not reviewed $</span>`+
+    `<span style="color:var(--text3)">bar width = status size</span></div>`;
+  const bs={};
+  notRev.forEach(o=>{const k=o.salesperson||'—';(bs[k]=bs[k]||{v:0,n:0});bs[k].v+=o.total;bs[k].n++;});
+  const list=Object.entries(bs).map(([k,x])=>({k,v:x.v,n:x.n})).sort((a,b)=>b.v-a.v);
+  const mx=list.length?list[0].v:1;
+  $('dashSales').innerHTML=list.length
+    ?list.map(r=>hbar(shortName(r.k),r.v,mx,'var(--amber)',r.n)).join('')
+    :'<div class="empty">Nothing outstanding — all reviewed. 🎉</div>';
 }
 
 // ── Projection ───────────────────────────────────────────────────────
@@ -840,8 +948,9 @@ async function applyAccessGate(){
 // ── views ────────────────────────────────────────────────────────────
 function switchView(v,el){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));el.classList.add('active');
-  ['review','projection','inputs'].forEach(x=>$('view-'+x).classList.toggle('hidden',x!==v));
+  ['review','dashboard','projection','inputs'].forEach(x=>$('view-'+x).classList.toggle('hidden',x!==v));
   $('loadbar').classList.toggle('hidden',v!=='review');
+  if(v==='dashboard')renderDashboard();
   if(v==='projection')renderProjection();
   if(v==='inputs'){buildPacingEditor();buildMtdInputs();renderMtdBreakdown();}
 }
