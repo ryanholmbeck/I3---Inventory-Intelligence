@@ -126,7 +126,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.11</span>
+  <span class="tag" id="ver">v0.12</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami" title="You — set by picking your name in the Salesperson filter with 'Only mine' on. Stamps your reviews.">👤 <span id="whoName">—</span></span>
@@ -771,8 +771,8 @@ function renderDashboard(){
     hbar('Past due',dSum(pastDue,'total'),ageMax,'var(--red)',pastDue.length)+
     hbar('This period',dSum(current,'total'),ageMax,'var(--accent)',current.length)+
     hbar('Beyond window',dSum(future,'total'),ageMax,'var(--text3)',future.length);
-  const STAT=[['In Stock; Ship','in_stock'],['On PO','on_po'],['On Prod Ord','on_prod'],
-    ['On Ass Order','on_asm'],['No PO','needs_po']];
+  const STAT=[['In Stock; Ship','in_stock'],['On PO','on_po'],['On Assembly Order','on_asm'],
+    ['On Production Order','on_prod'],['No PO','needs_po']];
   const srows=STAT.map(([label,key])=>{let r=0,n=0;
     scope.forEach(o=>{const a=o[key]||0;if(isRev(o))r+=a;else n+=a;});return {label,r,n,t:r+n};});
   const sMax=Math.max(...srows.map(x=>x.t),1);
