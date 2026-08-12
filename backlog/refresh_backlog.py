@@ -145,12 +145,17 @@ def usable_params(s, url, params):
     return None
 
 
-def fetch_all(s, url, params=None):
+def fetch_all(s, url, params=None, fatal=True):
     """Walk @odata.nextLink paging from a full entity URL. $select/$filter
-    (in params) keep the first-page payload small; nextLink carries them on."""
+    (in params) keep the first-page payload small; nextLink carries them on.
+    fatal=False (for optional enrichment feeds) skips the feed on a non-200
+    instead of aborting the whole refresh — e.g. a wrong/absent web service."""
     first = True
     while url:
-        r = _get(s, url, params if first else None)
+        r = _get(s, url, params if first else None, fatal=fatal)
+        if r is None or r.status_code != 200:
+            print(f"  (skipped: HTTP {r.status_code if r is not None else '???'} on {url})")
+            return
         body = r.json()
         for row in body.get('value', []):
             yield row
@@ -251,7 +256,7 @@ def build_keyset(s, url, item_fields, loc_fields, label,
         return keys
     try:
         sample_logged = False
-        for r in fetch_all(s, url):
+        for r in fetch_all(s, url, fatal=False):
             item = next((str(r[f]).strip() for f in item_fields
                          if r.get(f) not in (None, '')), '')
             loc = next((str(r[f]).strip() for f in loc_fields
@@ -313,7 +318,7 @@ def refresh(cfg):
             pp = usable_params(s, purl, {
                 '$select': 'No,Location_Code,Outstanding_Quantity,Document_Type',
                 '$filter': "Document_Type eq 'Order' and Outstanding_Quantity gt 0"})
-            for pl in fetch_all(s, purl, pp):
+            for pl in fetch_all(s, purl, pp, fatal=False):
                 if numf(pl.get('Outstanding_Quantity')) > 0:
                     on_po.add((str(pl.get('No', '')).strip(), str(pl.get('Location_Code', '')).strip()))
             print(f"  open PO item/locations: {len(on_po):,}")
