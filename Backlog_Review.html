@@ -126,7 +126,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 <body>
 <div id="top">
   <h1>📋 Backlog Review</h1>
-  <span class="tag" id="ver">v0.10</span>
+  <span class="tag" id="ver">v0.11</span>
   <span class="tag" id="asof"></span>
   <div class="spacer"></div>
   <span id="whoami" title="You — set by picking your name in the Salesperson filter with 'Only mine' on. Stamps your reviews.">👤 <span id="whoName">—</span></span>
@@ -229,17 +229,17 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
         <span class="tag" id="pacingMsg"></span></div>
     </div>
     <div class="card">
-      <h3>Daily Invoiced Shipments — enter each day's invoiced $ by budget group (from Flow360)</h3>
+      <h3>MTD Invoiced Shipments — enter the running month-to-date $ by budget group (from Flow360)</h3>
       <div class="bar">
-        <label>Date <input type="text" id="mtdDate" placeholder="YYYY-MM-DD" style="width:120px"></label>
+        <label>As-of date <input type="text" id="mtdDate" placeholder="YYYY-MM-DD" style="width:120px"></label>
         <span id="mtdInputs" style="display:flex;gap:8px;flex-wrap:wrap"></span>
-        <button class="btn" onclick="saveMTD()">💾 Save Daily</button>
+        <button class="btn" onclick="saveMTD()">💾 Save MTD</button>
         <button class="btn ghost" onclick="exportMTD()">📄 Export CSV</button>
         <span class="tag" id="mtdMsg"></span>
       </div>
       <div class="wrap" style="max-height:320px;margin-top:8px"><table id="tblMtd">
-        <thead><tr><th>Date</th><th>Group</th><th class="num">Daily $</th><th class="num">MTD $</th><th class="num">Elapsed WD</th><th class="num">Pace/WD</th></tr></thead>
-        <tbody id="mtdBody"><tr><td colspan="6" class="empty">Enter daily values to see running MTD + pace.</td></tr></tbody>
+        <thead><tr><th>Date</th><th>Group</th><th class="num">MTD $</th><th class="num">Δ Daily $</th><th class="num">Elapsed WD</th><th class="num">Pace/WD</th></tr></thead>
+        <tbody id="mtdBody"><tr><td colspan="6" class="empty">Enter MTD values to see derived daily + pace.</td></tr></tbody>
       </table></div>
     </div>
   </div>
@@ -335,20 +335,21 @@ async function loadPacing(){
   DAILY=await sbSelAll('bl_daily_invoiced','invoice_date,budget_group,amount',null,'invoice_date.asc')||[];
   computeShape();
 }
-// latest cumulative MTD from the (legacy) bl_mtd_invoiced table — fallback only
+// latest cumulative MTD entered for a group this month (from bl_mtd_invoiced)
 function latestMTD(g){
   const mo=curMonth();
   const rows=MTD.filter(r=>r.budget_group===g&&String(r.invoice_date).slice(0,7)===mo)
     .sort((a,b)=>a.invoice_date<b.invoice_date?1:-1);
   return rows.length?num(rows[0].mtd_amount):0;
 }
-// current-month invoiced MTD, auto-derived by summing the daily table; falls
-// back to bl_mtd_invoiced when no daily rows exist for the month yet
+// current-month invoiced MTD for the projection: the entered cumulative MTD;
+// falls back to summing the daily table if no MTD has been entered yet
 function invMTDof(g){
+  const m=latestMTD(g);
+  if(m>0)return m;
   const mo=curMonth();
-  const rows=DAILY.filter(r=>r.budget_group===g&&String(r.invoice_date).slice(0,7)===mo);
-  if(rows.length)return rows.reduce((s,r)=>s+num(r.amount),0);
-  return latestMTD(g);
+  return DAILY.filter(r=>r.budget_group===g&&String(r.invoice_date).slice(0,7)===mo)
+    .reduce((s,r)=>s+num(r.amount),0);
 }
 // Build the seasonal "shape" curve per budget group: the typical cumulative
 // fraction of the month invoiced by each working-day index, averaged over
@@ -867,52 +868,56 @@ async function savePacing(){
   $('pacingMsg').textContent=ok?'✓ saved':'save failed (offline?)';
   await loadPacing(); renderProjection();
 }
-// ── Daily invoiced entry → bl_daily_invoiced (MTD auto-derives from this) ─
+// ── MTD invoiced entry (Flow360 gives cumulative MTD, not daily) ─────
+// Stored in bl_mtd_invoiced. On save we also derive the day's delta and
+// write it to bl_daily_invoiced so the seasonal shape curve keeps learning.
 function buildMtdInputs(){
   $('mtdInputs').innerHTML=BUDGET_GROUPS.map(g=>
     `<label style="font-size:10px">${g}<br><input type="text" id="mtd_${g}" placeholder="0" style="width:90px;text-align:right"></label>`).join('');
-  // prefill from the daily amount already stored for the chosen date
+  // prefill from the MTD already stored for the chosen date
   const d=clean($('mtdDate').value);
-  BUDGET_GROUPS.forEach(g=>{const row=DAILY.find(r=>String(r.invoice_date).slice(0,10)===d&&r.budget_group===g);
-    if($('mtd_'+g))$('mtd_'+g).value=row?row.amount:'';});
+  BUDGET_GROUPS.forEach(g=>{const row=MTD.find(r=>String(r.invoice_date).slice(0,10)===d&&r.budget_group===g);
+    if($('mtd_'+g))$('mtd_'+g).value=row?row.mtd_amount:'';});
 }
 async function saveMTD(){
   const d=clean($('mtdDate').value);
   if(!d){$('mtdMsg').textContent='date required';return;}
-  const rows=BUDGET_GROUPS.map(g=>({invoice_date:d,budget_group:g,amount:num($('mtd_'+g).value),updated_by:WHO}))
-    .filter(r=>r.amount!==0||DAILY.some(x=>String(x.invoice_date).slice(0,10)===d&&x.budget_group===r.budget_group));
-  if(!rows.length){$('mtdMsg').textContent='enter at least one value';return;}
-  const ok=await sbUp('bl_daily_invoiced',rows,'invoice_date,budget_group');
+  const mo=d.slice(0,7);
+  const mtdRows=BUDGET_GROUPS.map(g=>({invoice_date:d,budget_group:g,mtd_amount:num($('mtd_'+g).value),updated_by:WHO}))
+    .filter(r=>r.mtd_amount>0||MTD.some(x=>String(x.invoice_date).slice(0,10)===d&&x.budget_group===r.budget_group));
+  if(!mtdRows.length){$('mtdMsg').textContent='enter at least one value';return;}
+  // derive the day's delta = entered MTD − most recent earlier MTD this month
+  const dailyRows=mtdRows.map(r=>{
+    const priors=MTD.filter(x=>x.budget_group===r.budget_group&&String(x.invoice_date).slice(0,7)===mo
+      &&String(x.invoice_date).slice(0,10)<d).sort((a,b)=>a.invoice_date<b.invoice_date?1:-1);
+    const prior=priors.length?num(priors[0].mtd_amount):0;
+    return {invoice_date:d,budget_group:r.budget_group,amount:Math.round((r.mtd_amount-prior)*100)/100,updated_by:WHO};
+  });
+  const ok=await sbUp('bl_mtd_invoiced',mtdRows,'invoice_date,budget_group');
+  await sbUp('bl_daily_invoiced',dailyRows,'invoice_date,budget_group');
   $('mtdMsg').textContent=ok?'✓ saved':'save failed (offline?)';
-  await loadPacing(); renderMtdBreakdown(); renderProjection();
+  await loadPacing(); renderMtdBreakdown(); renderProjection(); renderDashboard();
 }
-// Show recent daily entries with running MTD + pace, straight from the daily table
+// derived daily = MTD[date] − MTD[prior date same month]; pace = MTD / elapsed WD
 function renderMtdBreakdown(){
   const byDate={};
-  DAILY.forEach(r=>{const dt=String(r.invoice_date).slice(0,10);
-    (byDate[dt]=byDate[dt]||{})[r.budget_group]=num(r.amount);});
+  MTD.forEach(r=>{const dt=String(r.invoice_date).slice(0,10);
+    (byDate[dt]=byDate[dt]||{})[r.budget_group]=num(r.mtd_amount);});
   const dates=Object.keys(byDate).sort();
   const body=$('mtdBody'); if(!body)return;
-  const runMTD={};   // running cumulative per (month,group)
-  const mtdByDateG={};
-  dates.forEach(dt=>{const mo=dt.slice(0,7);
-    for(const g of BUDGET_GROUPS){
-      if(byDate[dt][g]==null)continue;
-      const key=mo+g; runMTD[key]=(runMTD[key]||0)+byDate[dt][g];
-      (mtdByDateG[dt]=mtdByDateG[dt]||{})[g]=runMTD[key];
-    }});
   const out=[];
   for(let i=dates.length-1;i>=0&&out.length<60;i--){
     const dt=dates[i];
+    const prior=dates.slice(0,i).reverse().find(x=>x.slice(0,7)===dt.slice(0,7)); // prior date same month
     const ewd=workingDays(new Date(dt.slice(0,8)+'01'),new Date(dt));
     for(const g of BUDGET_GROUPS){
-      const daily=byDate[dt][g]; if(daily==null)continue;
-      const mtd=mtdByDateG[dt][g];
-      out.push(`<tr><td class="mono">${dt}</td><td>${g}</td><td class="num">${money(daily)}</td>
-        <td class="num">${money(mtd)}</td><td class="num">${ewd}</td><td class="num">${money(ewd>0?mtd/ewd:0)}</td></tr>`);
+      const mtd=byDate[dt][g]; if(mtd==null)continue;
+      const delta=prior&&byDate[prior][g]!=null?mtd-byDate[prior][g]:mtd;
+      out.push(`<tr><td class="mono">${dt}</td><td>${g}</td><td class="num">${money(mtd)}</td>
+        <td class="num">${money(delta)}</td><td class="num">${ewd}</td><td class="num">${money(ewd>0?mtd/ewd:0)}</td></tr>`);
     }
   }
-  body.innerHTML=out.length?out.join(''):'<tr><td colspan="6" class="empty">Enter daily values to see running MTD + pace.</td></tr>';
+  body.innerHTML=out.length?out.join(''):'<tr><td colspan="6" class="empty">Enter MTD values to see derived daily + pace.</td></tr>';
 }
 
 function exportTargets(){
@@ -922,10 +927,10 @@ function exportTargets(){
   download(`Monthly_Targets_${PERIOD}.csv`,toCSV(H,rows));
 }
 function exportMTD(){
-  const H=['Invoice Date','Budget Group','Daily Invoiced $'];
-  const rows=DAILY.slice().sort((a,b)=>(a.invoice_date>b.invoice_date?1:(a.invoice_date<b.invoice_date?-1:(a.budget_group>b.budget_group?1:-1))))
-    .map(r=>[String(r.invoice_date).slice(0,10),r.budget_group,Math.round(num(r.amount))]);
-  download(`Daily_Invoiced_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
+  const H=['As-of Date','Budget Group','MTD Invoiced $'];
+  const rows=MTD.slice().sort((a,b)=>(a.invoice_date>b.invoice_date?1:(a.invoice_date<b.invoice_date?-1:(a.budget_group>b.budget_group?1:-1))))
+    .map(r=>[String(r.invoice_date).slice(0,10),r.budget_group,Math.round(num(r.mtd_amount))]);
+  download(`MTD_Invoiced_${new Date().toISOString().slice(0,10)}.csv`,toCSV(H,rows));
 }
 
 // ── access gate: restrict Projection + Pacing tabs to admins ─────────
