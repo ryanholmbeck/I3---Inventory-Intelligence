@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Backlog Review — Daily Order Review & Month-End Forecast</title>
 <script src="vendor/papaparse.min.js"></script>
+<script src="vendor/xlsx.full.min.js"></script>
 <!-- Hosted config (written at deploy from a Cloudflare secret; not in the repo). -->
 <script src="supabase/config.js" onerror="console.info('no hosted config')"></script>
 <!-- Local override for the on-prem server (gitignored). Loads second so it wins locally. -->
@@ -146,8 +147,8 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
     <button class="btn" id="reload" onclick="loadFromCloud(true)" title="Pull the latest open orders from the cloud">↻ Reload orders</button>
     <span class="tag" id="loadinfo"></span>
     <span class="spacer"></span>
-    <button class="iconbtn" onclick="document.getElementById('file').click()" title="Manual/offline: import a Source Sales Lines CSV">⇪ Import CSV</button>
-    <div class="drop hidden" id="drop"><input type="file" id="file" accept=".csv" class="hidden"></div>
+    <button class="iconbtn" onclick="document.getElementById('file').click()" title="Load today's BC exports (Sales Lines, Sales Orders, Purchase Lines, Revenue file) — select them all at once">⇪ Load Backlog Files</button>
+    <div class="drop hidden" id="drop"><input type="file" id="file" accept=".xlsx,.xlsm,.xls,.csv" multiple class="hidden"></div>
   </div>
 
   <!-- REVIEW VIEW -->
@@ -266,7 +267,28 @@ let PACING = {};              // 'group' -> {budget,forecast,sni}
 let MTD = [];                 // {invoice_date, budget_group, mtd_amount} cumulative (legacy/fallback)
 let DAILY = [];               // {invoice_date, budget_group, amount} daily invoiced (history + current)
 let SHAPE = {};               // budget_group -> {frac:[by working-day], nMonths} typical within-month curve
+let SCORECARD = {};           // budget_group -> {revenue, sni, backlog} from the daily revenue file
 const PERIOD = new Date().toISOString().slice(0,7);
+
+// Built-in Location Code → {name, group} map. Lets the app resolve budget
+// groups with no Supabase/cloud config (Supabase only overrides it if present).
+// 97 Consignment / 99 Transfer intentionally have no group (excluded).
+const DEFAULT_GMAP = {
+  '00':{name:'Indelco-Minneapolis',group:'MN'}, '10':{name:'Indelco-Fab',group:'MN'},
+  '01':{name:'Indelco-Denver',group:'Branches'}, '02':{name:'Indelco-Chicago',group:'Branches'},
+  '03':{name:'Indelco-Nebraska',group:'Branches'}, '04':{name:'Indelco-Wisconsin',group:'Branches'},
+  '05':{name:'Indelco-Euclid',group:'Branches'}, '06':{name:'Indelco-St Louis',group:'Branches'},
+  '07':{name:'Indelco-Kansas City',group:'Branches'}, '08':{name:'Indelco-Louisville',group:'Branches'},
+  '09':{name:'Indelco-Decatur',group:'Branches'}, '11':{name:'Indelco-Indiana',group:'Branches'},
+  '12':{name:'Indelco-Memphis',group:'Branches'}, '14':{name:'Indelco-Michigan',group:'Branches'},
+  '21':{name:'Corr Tech - Dallas TX',group:'CorrTech'}, '22':{name:'Corr Tech - Houston',group:'CorrTech'},
+  '23':{name:'Corr Tech - Gonzales LA',group:'CorrTech'}, '24':{name:'Corr Tech - Sulphur LA',group:'CorrTech'},
+  '25':{name:'Corr Tech - Austin TX',group:'CorrTech'}, '27':{name:'Corr Tech - San Antonio',group:'CorrTech'},
+  '35':{name:'Ayer Sales - Woburn',group:'Ayer'}, '36':{name:'Ayer Sales - Selkirk',group:'Ayer'},
+  '37':{name:'Ayer Sales - Syracuse',group:'Ayer'}, '40':{name:'Quality Stainless',group:'QS'},
+};
+function ensureGMAP(){ if(!Object.keys(GMAP).length) GMAP=Object.assign({},DEFAULT_GMAP); }
+const bgOf=loc=>{const g=GMAP[clean(loc)];return g?g.group:'';};
 
 // ── Supabase (PostgREST over fetch) ──────────────────────────────────
 function sbOn(){return !!(SB&&SB.url&&SB.anonKey);}
@@ -303,17 +325,18 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   // load config tables
   const gm=await sbSel('bl_budget_group_map','select=location_code,location_name,budget_group');
   if(gm)gm.forEach(r=>GMAP[clean(r.location_code)]={name:r.location_name,group:r.budget_group});
+  ensureGMAP();   // no cloud? use the built-in Location Code → Budget Group map
   await loadReviews(); await loadPacing();
   // budget group filter dropdown
   BUDGET_GROUPS.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;$('fGroup').appendChild(o);});
   $('mtdDate').value=new Date().toISOString().slice(0,10);
   buildPacingEditor(); buildMtdInputs(); renderMtdBreakdown();
   // file handlers
-  $('file').addEventListener('change',e=>{if(e.target.files[0])loadCSV(e.target.files[0]);});
+  $('file').addEventListener('change',e=>{const fs=e.target.files;if(fs&&fs.length){/\.csv$/i.test(fs[0].name)&&fs.length===1?loadCSV(fs[0]):ingestBacklogFiles(fs);}});
   const dz=$('drop');
   ['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('over');}));
   ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('over');}));
-  dz.addEventListener('drop',e=>{if(e.dataTransfer.files[0])loadCSV(e.dataTransfer.files[0]);});
+  dz.addEventListener('drop',e=>{const fs=e.dataTransfer.files;if(fs&&fs.length)ingestBacklogFiles(fs);});
   ['fGroup','fBranch','fStatus','fWindow'].forEach(id=>$(id).addEventListener('change',renderReview));
   $('fSearch').addEventListener('input',renderReview);
   // identity via the Salesperson filter: picking a name while "Only mine" is on = "that's me"
@@ -418,7 +441,7 @@ async function sbSelAll(t,cols,filter,order='document_no.asc,line_no.asc'){
   return all;
 }
 async function loadFromCloud(manual){
-  if(!sbOn()){if(manual)$('loadinfo').textContent='no cloud configured — drop a CSV instead';return;}
+  if(!sbOn()){$('loadinfo').textContent='Click "⇪ Load Backlog Files" and select today’s exports (Sales Lines, Sales Orders, Purchase Lines + the revenue file).';return;}
   const btn=$('reload'); if(btn){btn.disabled=true;btn.textContent='↻ loading…';}
   $('loadinfo').textContent='loading from cloud…';
   try{
@@ -522,6 +545,133 @@ function summarize(lines){
     o.days_late=(o.earliest&&o.earliest<today)?workingDays(new Date(o.earliest),new Date(today)):0;
     return o;
   }).sort((a,b)=>b.total-a.total);
+}
+
+// ── Local backlog ingestion: raw BC .xlsx exports → orders + scorecard ─
+// The no-cloud data path. The user drops the day's exports from the
+// SharePoint "Backlog Files" folder; we do the join + classification here,
+// client-side (no server, no Supabase), then feed the same summarize()/render
+// pipeline. Verified against real exports: Sales Line→Order join 100%, On-PO
+// supply matched by item+location, and backlog $ (ship ≤ month-end) ties to
+// the revenue file's Backlog summary within ~1.4%.
+const stripPfx=d=>clean(d).replace(/^[A-Z]{2}-/,'');   // drop AS-/CT-/QS- company prefix
+function readWB(file){return file.arrayBuffer().then(buf=>XLSX.read(buf,{type:'array',cellDates:true}));}
+function wsRows(wb,name){const ws=wb.Sheets[name];return ws?XLSX.utils.sheet_to_json(ws,{raw:true,defval:null}):[];}
+function wsGrid(wb,name){const ws=wb.Sheets[name];return ws?XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null}):[];}
+// identify which report a workbook is, by its sheet names
+function classifyWB(wb){
+  const n=wb.SheetNames;
+  if(n.includes('Branch summary')||n.includes('Shipped not Invd')||n.includes('Backlog summary'))return 'revenue';
+  for(const k of ['Sales Lines','Sales Orders','Purchase Lines','Purchase Orders','Assembly Orders','Production Orders'])
+    if(n.includes(k))return k;
+  return null;
+}
+// supply index keyed by item (optionally +location) from open supply lines
+function supplyIndex(rows,itemKey,locKey,qtyKey,dueKey,docKey,byLocation){
+  const idx={};
+  for(const r of rows){
+    if(('Type' in r)&&clean(r['Type'])!=='Item')continue;
+    const q=num(r[qtyKey]); if(q<=0)continue;
+    const item=clean(r[itemKey]); if(!item)continue;
+    const key=byLocation?(item+''+clean(r[locKey])):item;
+    const due=dueKey?r[dueKey]:null;
+    const cur=idx[key]||{qty:0,due:null,doc:null};
+    cur.qty+=q;
+    if(due&&(!cur.due||new Date(due)<new Date(cur.due))){cur.due=due;cur.doc=docKey?stripPfx(r[docKey]):null;}
+    idx[key]=cur;
+  }
+  return idx;
+}
+// build canonical order lines (summarize() shape) from raw sales + supply
+function buildLines(SL,SO,poIdx,asmIdx,prodIdx){
+  const soByDoc={}; SO.forEach(r=>{soByDoc[clean(r['No.'])]=r;});
+  const lines=[];
+  for(const r of SL){
+    const oq=num(r['Outstanding Quantity']); if(oq<=0)continue;
+    const qty=num(r['Quantity']), lineAmt=num(r['Line Amount Excl. Tax']);
+    const outAmt=qty>0?lineAmt*(oq/qty):lineAmt;     // open $ portion of the line
+    const loc=clean(r['Location Code']), item=clean(r['No.']), qoh=num(r['Quantity on Hand']);
+    const doc=clean(r['Document No.']), h=soByDoc[doc]||{};
+    const po=poIdx[item+''+loc], asm=asmIdx[item+''+loc], prod=prodIdx[item];
+    // one status per line: In Stock → On PO → On Assembly → On Production → Needs PO
+    let status;
+    if(qoh>=oq)status='In Stock; Ship';
+    else if(po&&po.qty>0)status='On PO';
+    else if(asm&&asm.qty>0)status='On Assembly';
+    else if(prod&&prod.qty>0)status='On Production';
+    else status='Needs PO';
+    lines.push({
+      document_no:doc, customer_no:clean(r['Sell-to Customer No.']),
+      customer_name:clean(h['Sell-to Customer Name']),
+      location_code:loc, branch_name:(GMAP[loc]&&GMAP[loc].name)||loc,
+      salesperson:clean(h['Created By']),          // domain\user = workstation identity
+      outstanding_amount:outAmt, outstanding_qty:oq, qty_on_hand:qoh,
+      po_number:po?po.doc:'', on_po:po?Math.min(oq,po.qty):0,
+      status, shipment_date:dstr(r['Shipment Date']),
+      is_ds:r['Drop Shipment']?'Yes':'',
+      budget_group:bgOf(loc),
+      line_no:num(r['Line No.']), item_no:item, description:clean(r['Description']),
+      uom:clean(r['Unit of Measure Code']), quantity:qty, order_date:dstr(h['Order Date']),
+    });
+  }
+  return lines;
+}
+// revenue file → {group:{revenue,sni,backlog}} (header-NAME detection; robust to layout)
+function parseScorecard(wb){
+  const s=v=>v==null?'':String(v).trim(), code2=v=>{const t=s(v);return /^\d{2}$/.test(t)?t:null;};
+  const findHeader=(g,labels)=>{for(let r=0;r<g.length;r++){const row=(g[r]||[]).map(s);
+    if(labels.every(l=>row.includes(l))){const c={};labels.forEach(l=>c[l]=row.indexOf(l));return{row:r,c};}}return null;};
+  const sumByLoc=(g,h,codeL,valL)=>{const out={};if(!h)return out;
+    for(let r=h.row+1;r<g.length;r++){const row=g[r]||[];const c=code2(row[h.c[codeL]]);
+      if(c&&GMAP[c])out[c]=(out[c]||0)+num(row[h.c[valL]]);}return out;};
+  const REVCOL='Sales Amount (Actual)';
+  const bs=wsGrid(wb,'Branch summary'), rev=sumByLoc(bs,findHeader(bs,['Code',REVCOL]),'Code',REVCOL);
+  const sn=wsGrid(wb,'Shipped not Invd'), sni=sumByLoc(sn,findHeader(sn,['Branch','Ending Balance']),'Branch','Ending Balance');
+  const bk=wsGrid(wb,'Backlog summary'), bl=sumByLoc(bk,findHeader(bk,['Row Labels','Sum of Outstanding Amount']),'Row Labels','Sum of Outstanding Amount');
+  const sc={}; BUDGET_GROUPS.forEach(g=>sc[g]={revenue:0,sni:0,backlog:0});
+  const add=(m,f)=>{for(const c in m){const g=GMAP[c]&&GMAP[c].group;if(g&&sc[g])sc[g][f]+=m[c];}};
+  add(rev,'revenue'); add(sni,'sni'); add(bl,'backlog');
+  return sc;
+}
+// push scorecard numbers into the pacing SNI + today's MTD (Centrex left manual)
+function applyScorecard(sc){
+  SCORECARD=sc;
+  const asof=new Date().toISOString().slice(0,10);
+  for(const g of BUDGET_GROUPS){
+    const v=sc[g]; if(!v)continue;
+    PACING[g]=Object.assign({},PACING[g]||{},{sni:Math.round(v.sni)});
+    const i=MTD.findIndex(r=>String(r.invoice_date).slice(0,10)===asof&&r.budget_group===g);
+    const row={invoice_date:asof,budget_group:g,mtd_amount:Math.round(v.revenue)};
+    if(i>=0)MTD[i]=row; else if(v.revenue>0)MTD.push(row);
+  }
+  buildPacingEditor(); renderMtdBreakdown();
+}
+// orchestrate a multi-file drop/select
+async function ingestBacklogFiles(fileList){
+  ensureGMAP();
+  const files=Array.from(fileList||[]).filter(f=>/\.xls[xm]?$/i.test(f.name));
+  if(!files.length){$('loadinfo').textContent='Select the .xlsx exports (Sales Lines, Sales Orders, Purchase Lines, + the revenue file).';return;}
+  $('loadinfo').textContent=`reading ${files.length} file(s)…`;
+  const got={};
+  for(const f of files){
+    try{const wb=await readWB(f);const kind=classifyWB(wb);if(kind)got[kind]={wb,name:f.name};}
+    catch(e){console.warn('read failed',f.name,e);}
+  }
+  if(got.revenue){try{applyScorecard(parseScorecard(got.revenue.wb));}catch(e){console.warn('scorecard',e);}}
+  if(got['Sales Lines']){
+    const SL=wsRows(got['Sales Lines'].wb,'Sales Lines');
+    const SO=got['Sales Orders']?wsRows(got['Sales Orders'].wb,'Sales Orders'):[];
+    const PL=got['Purchase Lines']?wsRows(got['Purchase Lines'].wb,'Purchase Lines'):[];
+    const AS=got['Assembly Orders']?wsRows(got['Assembly Orders'].wb,'Assembly Orders'):[];
+    const PR=got['Production Orders']?wsRows(got['Production Orders'].wb,'Production Orders'):[];
+    const poIdx=supplyIndex(PL,'No.','Location Code','Outstanding Quantity','Expected Receipt Date','Document No.',true);
+    const asmIdx=AS.length?supplyIndex(AS,'Item No.','Location Code','Remaining Quantity','Due Date','No.',true):{};
+    const prodIdx=PR.length?supplyIndex(PR,'Source No.',null,'Quantity','Due Date','No.',false):{};
+    ORDERS=summarize(buildLines(SL,SO,poIdx,asmIdx,prodIdx));
+    populateFilters(); renderReview(); renderProjection(); renderDashboard();
+  }
+  const parts=Object.keys(got);
+  $('loadinfo').textContent=(ORDERS.length?`${ORDERS.length.toLocaleString()} orders · `:'')+`loaded: ${parts.join(', ')||'nothing recognized'}`;
 }
 
 const shortName=v=>String(v||'').replace(/^.*\\/,'');

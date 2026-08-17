@@ -14,6 +14,9 @@
 # Historical / legacy data staging
 historical/
 
+# Node deps (only used locally for headless browser testing)
+node_modules/
+
 # Python bytecode
 __pycache__/
 *.pyc
