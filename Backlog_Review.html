@@ -562,7 +562,8 @@ function wsGrid(wb,name){const ws=wb.Sheets[name];return ws?XLSX.utils.sheet_to_
 function classifyWB(wb){
   const n=wb.SheetNames;
   if(n.includes('Branch summary')||n.includes('Shipped not Invd')||n.includes('Backlog summary'))return 'revenue';
-  for(const k of ['Sales Lines','Sales Orders','Purchase Lines','Purchase Orders','Assembly Orders','Production Orders'])
+  if(n.some(x=>/production orders/i.test(x)))return 'Production Orders';   // sheet is "Released Production Orders"
+  for(const k of ['Sales Lines','Sales Orders','Purchase Lines','Purchase Orders','Assembly Orders'])
     if(n.includes(k))return k;
   return null;
 }
@@ -583,7 +584,7 @@ function supplyIndex(rows,itemKey,locKey,qtyKey,dueKey,docKey,byLocation){
   return idx;
 }
 // build canonical order lines (summarize() shape) from raw sales + supply
-function buildLines(SL,SO,poIdx,asmIdx,prodIdx){
+function buildLines(SL,SO,poIdx,asmIdx,prodDocs){
   const soByDoc={}; SO.forEach(r=>{soByDoc[clean(r['No.'])]=r;});
   const lines=[];
   for(const r of SL){
@@ -592,13 +593,13 @@ function buildLines(SL,SO,poIdx,asmIdx,prodIdx){
     const outAmt=qty>0?lineAmt*(oq/qty):lineAmt;     // open $ portion of the line
     const loc=clean(r['Location Code']), item=clean(r['No.']), qoh=num(r['Quantity on Hand']);
     const doc=clean(r['Document No.']), h=soByDoc[doc]||{};
-    const po=poIdx[item+''+loc], asm=asmIdx[item+''+loc], prod=prodIdx[item];
+    const po=poIdx[item+''+loc], asm=asmIdx[item+''+loc], onProd=prodDocs.has(doc);
     // one status per line: In Stock → On PO → On Assembly → On Production → Needs PO
     let status;
     if(qoh>=oq)status='In Stock; Ship';
     else if(po&&po.qty>0)status='On PO';
     else if(asm&&asm.qty>0)status='On Assembly';
-    else if(prod&&prod.qty>0)status='On Production';
+    else if(onProd)status='On Production';
     else status='Needs PO';
     lines.push({
       document_no:doc, customer_no:clean(r['Sell-to Customer No.']),
@@ -663,11 +664,14 @@ async function ingestBacklogFiles(fileList){
     const SO=got['Sales Orders']?wsRows(got['Sales Orders'].wb,'Sales Orders'):[];
     const PL=got['Purchase Lines']?wsRows(got['Purchase Lines'].wb,'Purchase Lines'):[];
     const AS=got['Assembly Orders']?wsRows(got['Assembly Orders'].wb,'Assembly Orders'):[];
-    const PR=got['Production Orders']?wsRows(got['Production Orders'].wb,'Production Orders'):[];
+    let PR=[];
+    if(got['Production Orders']){const w=got['Production Orders'].wb;
+      const sh=w.SheetNames.find(x=>/production orders/i.test(x))||w.SheetNames[0]; PR=wsRows(w,sh);}
     const poIdx=supplyIndex(PL,'No.','Location Code','Outstanding Quantity','Expected Receipt Date','Document No.',true);
     const asmIdx=AS.length?supplyIndex(AS,'Item No.','Location Code','Remaining Quantity','Due Date','No.',true):{};
-    const prodIdx=PR.length?supplyIndex(PR,'Source No.',null,'Quantity','Due Date','No.',false):{};
-    ORDERS=summarize(buildLines(SL,SO,poIdx,asmIdx,prodIdx));
+    // production links to its sales order directly (verified 207/207) — mark those docs
+    const prodDocs=new Set(PR.filter(r=>clean(r['Sales Order'])&&num(r['Quantity'])>0).map(r=>stripPfx(r['Sales Order'])));
+    ORDERS=summarize(buildLines(SL,SO,poIdx,asmIdx,prodDocs));
     populateFilters(); renderReview(); renderProjection(); renderDashboard();
   }
   const parts=Object.keys(got);
