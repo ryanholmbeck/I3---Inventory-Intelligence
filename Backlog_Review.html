@@ -144,10 +144,11 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
 
   <!-- data load (cloud-primary; CSV drop kept hidden as an offline fallback) -->
   <div class="bar" id="loadbar">
-    <button class="btn" id="reload" onclick="loadFromCloud(true)" title="Pull the latest open orders from the cloud">↻ Reload orders</button>
+    <button class="btn" onclick="document.getElementById('file').click()" title="Load today's BC exports (Sales/Purchase/Assembly/Production + the revenue file) — select them all at once">⇪ Load Backlog Files</button>
     <span class="tag" id="loadinfo"></span>
     <span class="spacer"></span>
-    <button class="iconbtn" onclick="document.getElementById('file').click()" title="Load today's BC exports (Sales Lines, Sales Orders, Purchase Lines, Revenue file) — select them all at once">⇪ Load Backlog Files</button>
+    <span class="tag" id="folderStatus" title="Where your team's reviews are saved and merged together">📁 Reviews folder: not connected</span>
+    <button class="iconbtn" id="connectBtn" onclick="connectFolder()" title="Pick your SharePoint 'Backlog Files' folder once, so reviews save there and merge across everyone">🔗 Connect Reviews Folder</button>
     <div class="drop hidden" id="drop"><input type="file" id="file" accept=".xlsx,.xlsm,.xls,.csv" multiple class="hidden"></div>
   </div>
 
@@ -344,11 +345,17 @@ function workingDays(start,end){let n=0,d=new Date(start);while(d<=end){const w=
   $('fMine').addEventListener('change',()=>{if($('fMine').checked){if(WHO)$('fSales').value=WHO;}else{$('fSales').value='';}renderReview();});
   $('mtdDate').addEventListener('change',buildMtdInputs);
   await applyAccessGate();
-  // primary data path: pull open orders from the cloud (CSV drop is fallback)
+  updateFolderUI();
+  // no-cloud: user loads the day's exports via "Load Backlog Files"
   await loadFromCloud();
 })();
 
-async function loadReviews(){REVIEWS={};const r=await sbSel('bl_order_review','select=*');if(r)r.forEach(x=>REVIEWS[x.document_no]=x);}
+async function loadReviews(){
+  REVIEWS={}; MYREVIEWS={};
+  try{MYREVIEWS=JSON.parse(localStorage.getItem('bl_myreviews')||'{}')||{};}catch(e){MYREVIEWS={};}
+  mergeReviews(MYREVIEWS);          // my own work first (works with no folder)
+  await restoreFolder();            // if a folder was connected + still permitted, merge everyone
+}
 async function loadPacing(){
   PACING={};const p=await sbSel('bl_pacing_input',`select=*&period=eq.${PERIOD}`);
   if(p)p.forEach(x=>PACING[x.budget_group]={budget:x.monthly_budget,forecast:x.monthly_forecast,sni:x.current_sni});
@@ -678,7 +685,76 @@ async function ingestBacklogFiles(fileList){
   $('loadinfo').textContent=(ORDERS.length?`${ORDERS.length.toLocaleString()} orders · `:'')+`loaded: ${parts.join(', ')||'nothing recognized'}`;
 }
 
-const shortName=v=>String(v||'').replace(/^.*\\/,'');
+// ── Review persistence: per-user JSON files in the SharePoint folder ──
+// Each reviewer writes reviews_<user>.json; on load we read EVERY such file
+// in the folder and merge (last edit wins) → that's the funnel-up. No server,
+// no cloud — SharePoint's own sync moves the files between machines. Uses the
+// File System Access API (Edge/Chrome); a localStorage mirror keeps a user's
+// own work if the folder isn't connected.
+let DIR=null;            // FileSystemDirectoryHandle for the Backlog Files (or Reviews) folder
+let MYREVIEWS={};        // this user's own decisions (written to reviews_<me>.json)
+let REVIEWERS=0;         // # of reviewer files merged (status line)
+const safeWho=()=>((shortName(WHO)||'me').toLowerCase().replace(/[^a-z0-9]+/g,'')||'me');
+const myFileName=()=>`reviews_${safeWho()}.json`;
+
+// tiny IndexedDB kv — persists the folder handle across sessions
+function idb(){return new Promise((res,rej)=>{const r=indexedDB.open('bl_store',1);
+  r.onupgradeneeded=()=>r.result.createObjectStore('kv');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
+async function idbGet(k){try{const db=await idb();return await new Promise((res,rej)=>{const t=db.transaction('kv').objectStore('kv').get(k);t.onsuccess=()=>res(t.result);t.onerror=()=>rej(t.error);});}catch(e){return null;}}
+async function idbSet(k,v){try{const db=await idb();return await new Promise((res,rej)=>{const t=db.transaction('kv','readwrite').objectStore('kv').put(v,k);t.onsuccess=()=>res();t.onerror=()=>rej(t.error);});}catch(e){}}
+
+// merge one file's entries into REVIEWS (last edit wins by updated_at)
+function mergeReviews(map){
+  for(const doc in (map||{})){const e=map[doc];if(!e)continue;const cur=REVIEWS[doc];
+    if(!cur||String(e.updated_at||'')>=String(cur.updated_at||''))REVIEWS[doc]=e;}
+}
+// read every reviews_*.json in the folder, merge, and capture my own file
+async function readAllReviews(){
+  if(!DIR)return;
+  REVIEWS={}; REVIEWERS=0; const mine=myFileName().toLowerCase();
+  for await(const [name,h] of DIR.entries()){
+    if(h.kind!=='file'||!/^reviews_.*\.json$/i.test(name))continue;
+    try{const map=JSON.parse((await (await h.getFile()).text())||'{}');
+      mergeReviews(map); REVIEWERS++;
+      if(name.toLowerCase()===mine)MYREVIEWS=map;}
+    catch(e){console.warn('read reviews',name,e);}
+  }
+  mergeReviews(MYREVIEWS);   // my in-memory edits win over anything on disk
+  updateFolderUI();
+}
+// write my decisions to my file (debounced), plus a localStorage mirror
+let _saveT=null;
+function scheduleSave(){if(_saveT)clearTimeout(_saveT);_saveT=setTimeout(saveMyReviews,600);}
+async function saveMyReviews(){
+  try{localStorage.setItem('bl_myreviews',JSON.stringify(MYREVIEWS));}catch(e){}
+  if(!DIR)return;
+  try{const fh=await DIR.getFileHandle(myFileName(),{create:true});
+    const w=await fh.createWritable();await w.write(JSON.stringify(MYREVIEWS));await w.close();
+    updateFolderUI('saved '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
+  }catch(e){console.warn('save reviews',e);updateFolderUI('save failed');}
+}
+// connect (user gesture) → pick folder, remember it, merge everyone
+async function connectFolder(){
+  if(!window.showDirectoryPicker){alert('This browser can’t open a folder — use Edge or Chrome.');return;}
+  try{DIR=await window.showDirectoryPicker({mode:'readwrite',id:'bl-reviews'});}catch(e){return;/*cancelled*/}
+  try{if((await DIR.requestPermission({mode:'readwrite'}))!=='granted'){DIR=null;return;}}catch(e){}
+  await idbSet('dir',DIR);
+  await saveMyReviews();          // publish anything entered before connecting
+  await readAllReviews(); renderReview(); renderDashboard();
+}
+// silent restore on load if the browser still holds permission
+async function restoreFolder(){
+  const h=await idbGet('dir'); if(!h)return false;
+  try{if((await h.queryPermission({mode:'readwrite'}))==='granted'){DIR=h;await readAllReviews();return true;}}catch(e){}
+  DIR=null; return false;          // needs a click to re-grant
+}
+function updateFolderUI(msg){
+  const el=$('folderStatus'); if(!el)return;
+  el.textContent=DIR?`📁 ${DIR.name} · ${REVIEWERS} reviewer file(s)${msg?' · '+msg:''}`:'📁 Reviews folder: not connected';
+  el.style.color=DIR?'var(--green)':'var(--text3)';
+}
+
+function shortName(v){return String(v||'').replace(/^.*\\/,'');}  // hoisted: init() may call it before this line
 function populateFilters(){
   const sales=[...new Set(ORDERS.map(o=>o.salesperson).filter(Boolean))].sort((a,b)=>shortName(a).localeCompare(shortName(b)));
   const br=[...new Set(ORDERS.map(o=>o.branch_name).filter(Boolean))].sort();
@@ -863,19 +939,16 @@ function exportReview(){
 }
 
 async function setRev(doc,field,value){
-  const o=ORDERS.find(x=>x.document_no===doc)||{};
-  const rv=REVIEWS[doc]||{document_no:doc};
-  const old=rv[field]||'';
+  if(!WHO){const w=(prompt('Enter your name/initials to save your reviews under:')||'').trim();
+    if(!w)return; setWho(w);}
+  // start from my own entry if I have one, else copy the merged (someone else's) entry
+  const rv=Object.assign({document_no:doc},MYREVIEWS[doc]||REVIEWS[doc]||{});
   rv[field]=value; rv.reviewed_by=WHO; rv.source_system='INDELCO_BC';
-  REVIEWS[doc]=rv;
-  const payload={document_no:doc,source_system:rv.source_system,ship_this_month:rv.ship_this_month||null,
-    material_ordered:rv.material_ordered||null,if_not_shipping:rv.if_not_shipping||null,
-    carryover_notes:rv.carryover_notes||null,reviewed_ship_date:rv.reviewed_ship_date||null,
-    review_date:new Date().toISOString().slice(0,10),owner_initials:rv.owner_initials||null,
-    reviewed_by:WHO,updated_by:WHO};
-  await sbUp('bl_order_review',payload,'document_no');
-  await sbUp('bl_audit',{document_no:doc,field,old_value:String(old),new_value:String(value),changed_by:WHO});
-  if(field==='ship_this_month'){renderProjection();$('revcount')&&renderReview();}
+  rv.review_date=new Date().toISOString().slice(0,10);
+  rv.updated_at=new Date().toISOString();          // fine-grained for last-edit-wins merge
+  MYREVIEWS[doc]=rv; REVIEWS[doc]=rv;
+  scheduleSave();                                   // debounced write to reviews_<me>.json + mirror
+  if(field==='ship_this_month'){renderProjection();renderReview();}
 }
 
 // ── Dashboard ────────────────────────────────────────────────────────
