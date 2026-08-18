@@ -357,13 +357,8 @@ async function loadReviews(){
   await restoreFolder();            // if a folder was connected + still permitted, merge everyone
 }
 async function loadPacing(){
-  PACING={};const p=await sbSel('bl_pacing_input',`select=*&period=eq.${PERIOD}`);
-  if(p)p.forEach(x=>PACING[x.budget_group]={budget:x.monthly_budget,forecast:x.monthly_forecast,sni:x.current_sni});
-  const m=await sbSel('bl_mtd_invoiced','select=*');MTD=m||[];
-  // daily invoiced history (can exceed 1000 rows as history grows) → drives
-  // auto-MTD + the seasonal shape curve
-  DAILY=await sbSelAll('bl_daily_invoiced','invoice_date,budget_group,amount',null,'invoice_date.asc')||[];
-  computeShape();
+  await readPacingFile();
+  derivePacing();     // → PACING (targets), MTD, DAILY, shape (file overlays SNI/MTD when loaded)
 }
 // latest cumulative MTD entered for a group this month (from bl_mtd_invoiced)
 function latestMTD(g){
@@ -646,7 +641,8 @@ function applyScorecard(sc){
   SCORECARD=sc;
   const asof=new Date().toISOString().slice(0,10);
   for(const g of BUDGET_GROUPS){
-    const v=sc[g]; if(!v)continue;
+    const v=sc[g];
+    if(!v||(!v.revenue&&!v.sni&&!v.backlog))continue;   // group absent from the file (e.g. Centrex) → keep manual values
     PACING[g]=Object.assign({},PACING[g]||{},{sni:Math.round(v.sni)});
     const i=MTD.findIndex(r=>String(r.invoice_date).slice(0,10)===asof&&r.budget_group===g);
     const row={invoice_date:asof,budget_group:g,mtd_amount:Math.round(v.revenue)};
@@ -739,8 +735,12 @@ async function connectFolder(){
   try{DIR=await window.showDirectoryPicker({mode:'readwrite',id:'bl-reviews'});}catch(e){return;/*cancelled*/}
   try{if((await DIR.requestPermission({mode:'readwrite'}))!=='granted'){DIR=null;return;}}catch(e){}
   await idbSet('dir',DIR);
-  await saveMyReviews();          // publish anything entered before connecting
-  await readAllReviews(); renderReview(); renderDashboard();
+  await saveMyReviews();          // publish any reviews entered before connecting
+  await readAllReviews();
+  await readPacingFile();         // pull the shared pacing.json (or publish local if none yet)
+  await savePacingFile();
+  derivePacing(); overlayScorecard();
+  renderReview(); renderDashboard(); renderProjection();
 }
 // silent restore on load if the browser still holds permission
 async function restoreFolder(){
@@ -753,6 +753,56 @@ function updateFolderUI(msg){
   el.textContent=DIR?`📁 ${DIR.name} · ${REVIEWERS} reviewer file(s)${msg?' · '+msg:''}`:'📁 Reviews folder: not connected';
   el.style.color=DIR?'var(--green)':'var(--text3)';
 }
+
+// ── Pacing persistence: one shared pacing.json in the same folder ─────
+// Holds monthly targets (budget/forecast) + manual SNI, and manual MTD
+// entries (Centrex has no file feed, so it's typed here). Single shared file
+// (read-merge-write so untouched periods/groups aren't clobbered), mirrored
+// to localStorage. The daily revenue file still overrides SNI + today's MTD
+// for the five file-backed groups; pacing.json owns targets + Centrex.
+let PACINGDATA={pacing:{},mtd:{}};   // {pacing:{period:{group:{budget,forecast,sni}}}, mtd:{date:{group:amount}}}
+function derivePacing(){
+  PACING={}; const per=PACINGDATA.pacing[PERIOD]||{};
+  for(const g in per)PACING[g]=Object.assign({},per[g]);
+  MTD=[]; for(const d in PACINGDATA.mtd){const row=PACINGDATA.mtd[d];
+    for(const g in row){if(row[g]!=null&&row[g]!=='')MTD.push({invoice_date:d,budget_group:g,mtd_amount:num(row[g])});}}
+  // DAILY = per-day delta of cumulative MTD (feeds the seasonal shape curve)
+  DAILY=[]; const seen={};
+  MTD.slice().sort((a,b)=>a.invoice_date<b.invoice_date?-1:1).forEach(r=>{
+    const key=r.budget_group+'|'+String(r.invoice_date).slice(0,7); const prior=seen[key]||0;
+    DAILY.push({invoice_date:r.invoice_date,budget_group:r.budget_group,amount:Math.round((num(r.mtd_amount)-prior)*100)/100});
+    seen[key]=num(r.mtd_amount);});
+  computeShape();
+}
+// re-apply the daily file's SNI + today's MTD on top of pacing.json (file wins for the 5 groups)
+function overlayScorecard(){
+  if(SCORECARD&&Object.keys(SCORECARD).length)applyScorecard(SCORECARD);
+  else{buildPacingEditor();renderMtdBreakdown();}
+}
+function mergePacingInto(base){
+  const out={pacing:Object.assign({},base.pacing),mtd:Object.assign({},base.mtd)};
+  for(const p in PACINGDATA.pacing){out.pacing[p]=Object.assign({},out.pacing[p]||{},PACINGDATA.pacing[p]);}
+  for(const d in PACINGDATA.mtd){out.mtd[d]=Object.assign({},out.mtd[d]||{},PACINGDATA.mtd[d]);}
+  return out;
+}
+async function readPacingFile(){
+  if(DIR){try{const fh=await DIR.getFileHandle('pacing.json',{create:false});
+    PACINGDATA=JSON.parse((await (await fh.getFile()).text())||'{}');}catch(e){/* absent → keep current */}}
+  else{try{PACINGDATA=JSON.parse(localStorage.getItem('bl_pacing')||'{}');}catch(e){}}
+  if(!PACINGDATA.pacing)PACINGDATA.pacing={}; if(!PACINGDATA.mtd)PACINGDATA.mtd={};
+}
+async function savePacingFile(){
+  if(DIR){try{
+    let base={pacing:{},mtd:{}};
+    try{const fh0=await DIR.getFileHandle('pacing.json',{create:false});base=JSON.parse((await (await fh0.getFile()).text())||'{}');}catch(e){}
+    if(!base.pacing)base.pacing={}; if(!base.mtd)base.mtd={};
+    PACINGDATA=mergePacingInto(base);     // don't clobber others' untouched entries
+    const fh=await DIR.getFileHandle('pacing.json',{create:true});
+    const w=await fh.createWritable();await w.write(JSON.stringify(PACINGDATA));await w.close();
+  }catch(e){console.warn('save pacing',e);}}
+  try{localStorage.setItem('bl_pacing',JSON.stringify(PACINGDATA));}catch(e){}
+}
+
 
 function shortName(v){return String(v||'').replace(/^.*\\/,'');}  // hoisted: init() may call it before this line
 function populateFilters(){
@@ -1088,12 +1138,12 @@ function buildPacingEditor(){
     <td class="num"><input type="text" id="ps_${g}" value="${p.sni||''}" style="text-align:right"></td></tr>`;}).join('');
 }
 async function savePacing(){
-  const rows=BUDGET_GROUPS.map(g=>({period:PERIOD,budget_group:g,
-    monthly_budget:num($('pb_'+g).value),monthly_forecast:num($('pf_'+g).value),
-    current_sni:num($('ps_'+g).value),updated_by:WHO}));
-  const ok=await sbUp('bl_pacing_input',rows,'period,budget_group');
-  $('pacingMsg').textContent=ok?'✓ saved':'save failed (offline?)';
-  await loadPacing(); renderProjection();
+  const per=PACINGDATA.pacing[PERIOD]||(PACINGDATA.pacing[PERIOD]={});
+  BUDGET_GROUPS.forEach(g=>{per[g]={budget:num($('pb_'+g).value),forecast:num($('pf_'+g).value),sni:num($('ps_'+g).value)};});
+  await savePacingFile();
+  derivePacing(); overlayScorecard();   // file re-wins SNI/MTD for the 5 groups; Centrex stays manual
+  $('pacingMsg').textContent=DIR?'✓ saved to folder':'✓ saved locally — connect the folder to share';
+  renderProjection();
 }
 // ── MTD invoiced entry (Flow360 gives cumulative MTD, not daily) ─────
 // Stored in bl_mtd_invoiced. On save we also derive the day's delta and
@@ -1109,21 +1159,15 @@ function buildMtdInputs(){
 async function saveMTD(){
   const d=clean($('mtdDate').value);
   if(!d){$('mtdMsg').textContent='date required';return;}
-  const mo=d.slice(0,7);
-  const mtdRows=BUDGET_GROUPS.map(g=>({invoice_date:d,budget_group:g,mtd_amount:num($('mtd_'+g).value),updated_by:WHO}))
-    .filter(r=>r.mtd_amount>0||MTD.some(x=>String(x.invoice_date).slice(0,10)===d&&x.budget_group===r.budget_group));
-  if(!mtdRows.length){$('mtdMsg').textContent='enter at least one value';return;}
-  // derive the day's delta = entered MTD − most recent earlier MTD this month
-  const dailyRows=mtdRows.map(r=>{
-    const priors=MTD.filter(x=>x.budget_group===r.budget_group&&String(x.invoice_date).slice(0,7)===mo
-      &&String(x.invoice_date).slice(0,10)<d).sort((a,b)=>a.invoice_date<b.invoice_date?1:-1);
-    const prior=priors.length?num(priors[0].mtd_amount):0;
-    return {invoice_date:d,budget_group:r.budget_group,amount:Math.round((r.mtd_amount-prior)*100)/100,updated_by:WHO};
-  });
-  const ok=await sbUp('bl_mtd_invoiced',mtdRows,'invoice_date,budget_group');
-  await sbUp('bl_daily_invoiced',dailyRows,'invoice_date,budget_group');
-  $('mtdMsg').textContent=ok?'✓ saved':'save failed (offline?)';
-  await loadPacing(); renderMtdBreakdown(); renderProjection(); renderDashboard();
+  const row=PACINGDATA.mtd[d]||(PACINGDATA.mtd[d]={});
+  let any=false;
+  BUDGET_GROUPS.forEach(g=>{const el=$('mtd_'+g);if(!el)return;const v=el.value.trim();
+    if(v!==''){row[g]=num(v);any=true;}else if(row[g]!=null){delete row[g];}});
+  if(!any){$('mtdMsg').textContent='enter at least one value';return;}
+  await savePacingFile();
+  derivePacing(); overlayScorecard();
+  $('mtdMsg').textContent=DIR?'✓ saved to folder':'✓ saved locally — connect the folder to share';
+  renderMtdBreakdown(); renderProjection(); renderDashboard();
 }
 // derived daily = MTD[date] − MTD[prior date same month]; pace = MTD / elapsed WD
 function renderMtdBreakdown(){
