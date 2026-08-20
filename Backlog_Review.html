@@ -149,6 +149,7 @@ tr.late:hover td{background:rgba(224,82,82,.16)}
     <span class="spacer"></span>
     <span class="tag" id="folderStatus" title="Where your team's reviews are saved and merged together">📁 Reviews folder: not connected</span>
     <button class="iconbtn" id="connectBtn" onclick="connectFolder()" title="Pick your SharePoint 'Backlog Files' folder once, so reviews save there and merge across everyone">🔗 Connect Reviews Folder</button>
+    <button class="iconbtn" onclick="exportRollup()" title="Download an Excel rollup: Scorecard, MTD History, Reviews">⬇ Excel Rollup</button>
     <div class="drop hidden" id="drop"><input type="file" id="file" accept=".xlsx,.xlsm,.xls,.csv" multiple class="hidden"></div>
   </div>
 
@@ -726,6 +727,7 @@ async function saveMyReviews(){
   if(!DIR)return;
   try{const fh=await DIR.getFileHandle(myFileName(),{create:true});
     const w=await fh.createWritable();await w.write(JSON.stringify(MYREVIEWS));await w.close();
+    await writeRollupToFolder();
     updateFolderUI('saved '+new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}));
   }catch(e){console.warn('save reviews',e);updateFolderUI('save failed');}
 }
@@ -801,6 +803,7 @@ async function savePacingFile(){
     const w=await fh.createWritable();await w.write(JSON.stringify(PACINGDATA));await w.close();
   }catch(e){console.warn('save pacing',e);}}
   try{localStorage.setItem('bl_pacing',JSON.stringify(PACINGDATA));}catch(e){}
+  await writeRollupToFolder();
 }
 // snapshot today's MTD from the loaded revenue file → pacing.json history.
 // Builds the day-over-day series that drives daily sales + the pace curve.
@@ -812,6 +815,45 @@ async function recordDailyMTD(){
   for(const g of BUDGET_GROUPS){const v=SCORECARD[g]; if(v&&v.revenue>0)row[g]=Math.round(v.revenue);}  // Centrex (manual) untouched
   await savePacingFile();
   derivePacing(); overlayScorecard(); renderMtdBreakdown();
+}
+
+// ── Excel rollup: a human-readable Backlog_Rollup.xlsx dropped in the folder ─
+// The JSON files stay the store; this is a read-only reporting copy anyone can
+// open in Excel. Refreshed whenever pacing/reviews are written.
+function rollupSheets(){
+  const seen={}, hist=[];
+  Object.keys(PACINGDATA.mtd).sort().forEach(d=>{const row=PACINGDATA.mtd[d];
+    BUDGET_GROUPS.forEach(g=>{if(row[g]==null)return;const key=g+'|'+d.slice(0,7);
+      const prior=seen[key];const daily=prior!=null?num(row[g])-prior:num(row[g]);seen[key]=num(row[g]);
+      hist.push({Date:d,'Budget Group':g,'MTD Sales':Math.round(num(row[g])),'Daily Sales':Math.round(daily)});});});
+  const score=BUDGET_GROUPS.map(g=>{const s=SCORECARD[g]||{},p=PACING[g]||{};
+    return {'Budget Group':g,'MTD Revenue':Math.round(latestMTD(g)||s.revenue||0),'SNI':Math.round(p.sni||s.sni||0),
+      'Backlog':Math.round(s.backlog||0),'Budget':Math.round(p.budget||0),'Forecast':Math.round(p.forecast||0)};});
+  const rev=Object.values(REVIEWS).filter(r=>r&&(r.ship_this_month||r.carryover_notes)).map(r=>({
+    Order:r.document_no,'Ship This Month':r.ship_this_month||'',Notes:r.carryover_notes||'',
+    'Reviewed By':shortName(r.reviewed_by||''),'Review Date':r.review_date||''}));
+  return {score,hist,rev};
+}
+function buildRollupWB(){
+  const {score,hist,rev}=rollupSheets();
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(score),'Scorecard');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(hist.length?hist:[{Date:'',"Budget Group":''}]),'MTD History');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rev.length?rev:[{Order:''}]),'Reviews');
+  return wb;
+}
+async function writeRollupToFolder(){
+  if(!DIR)return;
+  try{const buf=XLSX.write(buildRollupWB(),{type:'array',bookType:'xlsx'});
+    const fh=await DIR.getFileHandle('Backlog_Rollup.xlsx',{create:true});
+    const w=await fh.createWritable();await w.write(buf);await w.close();}catch(e){console.warn('rollup write',e);}
+}
+function exportRollup(){   // manual download (works even with no folder connected)
+  const buf=XLSX.write(buildRollupWB(),{type:'array',bookType:'xlsx'});
+  const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='Backlog_Rollup_'+new Date().toISOString().slice(0,10)+'.xlsx';
+  document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),4000);
 }
 
 
