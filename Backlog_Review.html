@@ -661,7 +661,7 @@ async function ingestBacklogFiles(fileList){
     try{const wb=await readWB(f);const kind=classifyWB(wb);if(kind)got[kind]={wb,name:f.name};}
     catch(e){console.warn('read failed',f.name,e);}
   }
-  if(got.revenue){try{applyScorecard(parseScorecard(got.revenue.wb));}catch(e){console.warn('scorecard',e);}}
+  if(got.revenue){try{applyScorecard(parseScorecard(got.revenue.wb)); await recordDailyMTD();}catch(e){console.warn('scorecard',e);}}
   if(got['Sales Lines']){
     const SL=wsRows(got['Sales Lines'].wb,'Sales Lines');
     const SO=got['Sales Orders']?wsRows(got['Sales Orders'].wb,'Sales Orders'):[];
@@ -801,6 +801,17 @@ async function savePacingFile(){
     const w=await fh.createWritable();await w.write(JSON.stringify(PACINGDATA));await w.close();
   }catch(e){console.warn('save pacing',e);}}
   try{localStorage.setItem('bl_pacing',JSON.stringify(PACINGDATA));}catch(e){}
+}
+// snapshot today's MTD from the loaded revenue file → pacing.json history.
+// Builds the day-over-day series that drives daily sales + the pace curve.
+// Keyed by load date; re-loading the same day just overwrites that day.
+async function recordDailyMTD(){
+  if(!SCORECARD||!Object.keys(SCORECARD).length)return;
+  const d=new Date().toISOString().slice(0,10);
+  const row=PACINGDATA.mtd[d]||(PACINGDATA.mtd[d]={});
+  for(const g of BUDGET_GROUPS){const v=SCORECARD[g]; if(v&&v.revenue>0)row[g]=Math.round(v.revenue);}  // Centrex (manual) untouched
+  await savePacingFile();
+  derivePacing(); overlayScorecard(); renderMtdBreakdown();
 }
 
 
